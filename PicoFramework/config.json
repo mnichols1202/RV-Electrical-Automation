@@ -1,0 +1,13 @@
+{
+  "wifi_ssid": "M1Office",
+  "wifi_password": "S3cur1ty3742",
+  "target_id": "PicoW1",
+  "UdpPort": 5000,
+  "TcpPort": 5001,
+  "relays": [
+    { "id": "relay1", "label": "Water Heater", "relay_pin": 0, "button_pin": 19 },
+    { "id": "relay2", "label": "Water Pump", "relay_pin": 1, "button_pin": 18 },
+    { "id": "relay3", "label": "Exterior Lights", "relay_pin": 2, "button_pin": 17 },
+    { "id": "relay4", "label": "Interior Lights", "relay_pin": 3, "button_pin": 16 }
+  ]
+}

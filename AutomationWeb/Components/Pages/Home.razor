@@ -1,0 +1,43 @@
+﻿@page "/"
+
+@inject AutomationWeb.NetworkService NetworkService
+
+<PageTitle>Home</PageTitle>
+
+<h1>Hello, world!</h1>
+
+Welcome to your new app.
+
+<h3>Received Network Messages</h3>
+<ul>
+    @foreach (var msg in messages)
+    {
+        <li>@msg</li>
+    }
+</ul>
+
+@code {
+    private List<string> messages = new();
+
+    protected override void OnInitialized()
+    {
+        NetworkService.MessageReceived += OnMessageReceived;
+    }
+
+    private void OnMessageReceived(string msg)
+    {
+        // Ensure UI update on the main thread
+        InvokeAsync(() =>
+        {
+            messages.Insert(0, msg);
+            if (messages.Count > 100) // Limit list size
+                messages.RemoveAt(messages.Count - 1);
+            StateHasChanged();
+        });
+    }
+
+    public void Dispose()
+    {
+        NetworkService.MessageReceived -= OnMessageReceived;
+    }
+}
