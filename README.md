@@ -1,68 +1,127 @@
 # RV Electrical Automation
 
-This project is a work-in-progress platform for automating electrical systems in an RV using a network-connected microcontroller (Raspberry Pi Pico W) and a Blazor Server Web UI. The system allows real-time control of relays and communication with devices over TCP/IP and UDP protocols.
+**RV Electrical Automation** is a modular automation system for managing electrical components in an RV using Wi-Fi-enabled Raspberry Pi Pico W devices and a .NET 9 Blazor Server web application. Each Pico controls relays and communicates with a central dashboard over the network.
 
 ---
 
-## 🧩 Project Structure
+## Features
 
-### 1. **AutomationWeb/**  
-A .NET 9 Blazor Server application used to manage and monitor connected devices from a web interface.
-
-- `Program.cs` – Initializes services and configures the app.
-- `NetworkService.cs` – Handles incoming UDP broadcasts and TCP device communication.
-- `NetworkHostedService.cs` – Manages background listening for device discovery.
-- `Components/` – Contains Razor components and layout.
-- `wwwroot/app.css` – Basic styling.
-- `appsettings.json` – Configuration settings for ports and services.
-
-### 2. **PicoFramework/**  
-A MicroPython-based firmware for Raspberry Pi Pico W that connects to Wi-Fi, broadcasts its identity, listens for TCP commands, and toggles relays.
-
-- `main.py` – Entry point for the device; handles boot logic and task scheduling.
-- `pico_network.py` – Manages network setup, UDP broadcasting, and TCP socket handling.
-- `relay_toggle.py` – Contains logic for relay GPIO activation.
-- `config.json` – Stores device ID (e.g., `"Orange"` or `"Blue"`) and Wi-Fi credentials.
+- Real-time control of RV components via web dashboard
+- Auto-discovery of Pico devices using UDP broadcast
+- Reliable TCP command/control communication
+- JSON-configured relay mapping with labeled outputs
+- Dynamic UI generation based on device configuration
+- Physical button toggle support on the Pico
+- Multi-device support using unique `target_id` values
 
 ---
 
-## 🖥️ Features
+## Project Structure
 
-- 🔌 Control electrical relays from a browser interface
-- 📡 Auto-discovery of Pico devices via UDP broadcast
-- 🔗 Reliable communication via TCP/IP
-- ⚡ Toggle relays in real-time
-- 🧠 Device roles configurable via JSON
-
----
-
-## 🚧 Planned Features
-
-- Persistent relay state and event logging (SQL Server or LiteDB)
-- Device health/status display (e.g., uptime, IP, RSSI)
-- Authentication for access control
-- UI enhancements with real-time status feedback
-- Mobile-responsive layout for dashboard access on the go
+```
+RV-Electrical-Automation/
+├── AutomationWeb/              # Blazor Server web application
+│   ├── Components/             # Razor UI components
+│   ├── Services/               # TCP/UDP network logic
+│   └── wwwroot/                # Static files (CSS, JS)
+├── PicoFramework/              # MicroPython code for Raspberry Pi Pico W
+│   ├── config.json             # Device and relay configuration
+│   ├── main.py                 # Entry point
+│   ├── pico_network.py         # Networking logic
+│   └── relay_toggle.py         # GPIO relay control
+└── RV-Electrical-Automation.sln
+```
 
 ---
 
-## 🚀 Getting Started
+## Device Configuration (`config.json`)
 
-### Prerequisites
-- Raspberry Pi Pico W with MicroPython firmware
-- .NET 9 SDK installed
-- Visual Studio 2022+
-- Wi-Fi network shared between the Pico and server
+Each Pico is configured using a `config.json` file:
 
-### Setup Instructions
+```json
+{
+  "wifi_ssid": "YourSSID",
+  "wifi_password": "YourPassword",
+  "target_id": "PicoW1",
+  "UdpPort": 5000,
+  "TcpPort": 5001,
+  "relays": [
+    { "id": "relay1", "label": "Water Heater", "relay_pin": 0, "button_pin": 19 },
+    { "id": "relay2", "label": "Water Pump", "relay_pin": 1, "button_pin": 18 },
+    { "id": "relay3", "label": "Exterior Lights", "relay_pin": 2, "button_pin": 17 },
+    { "id": "relay4", "label": "Interior Lights", "relay_pin": 3, "button_pin": 16 }
+  ]
+}
+```
 
-#### 1. **Raspberry Pi Pico W**
-- Flash the Pico with MicroPython
-- Upload the contents of `PicoFramework/` via Thonny or rshell
-- Edit `config.json`:
-  ```json
-  {
-    "id": "Orange",
-    "wifi_ssid": "YourSSID",
-    "wifi_password": "YourPassword"
-  }
+- `target_id`: Unique name to identify the device on the network
+- `relays`: Array of relay/button mappings with GPIO assignments and display labels
+
+---
+
+## Communication Protocol
+
+| Protocol | Port  | Purpose                      |
+|----------|-------|------------------------------|
+| UDP      | 5000  | Device broadcasts availability on startup |
+| TCP      | 5001  | Server sends/receives commands to/from Pico |
+
+---
+
+## Getting Started
+
+### Hardware Requirements
+
+- Raspberry Pi Pico W
+- Relay modules (3.3V logic)
+- Optional: momentary push-buttons
+- Shared Wi-Fi network with the server
+
+### Raspberry Pi Setup
+
+1. Flash MicroPython to the Pico W
+2. Upload all files from `PicoFramework/` to the device
+3. Update `config.json` with Wi-Fi and relay settings
+4. Reboot the device
+
+### Server Setup
+
+1. Open `RV-Electrical-Automation.sln` in Visual Studio 2022+
+2. Build and run the `AutomationWeb` project
+3. Open a browser to `http://localhost:<port>` to access the UI
+4. Connected devices and their relays will appear automatically
+
+---
+
+## Operation Flow
+
+1. Pico connects to Wi-Fi and broadcasts its `target_id` over UDP
+2. Server listens and establishes a TCP connection
+3. Pico sends its relay configuration to the server
+4. UI is generated using relay labels from the config
+5. User interacts with the UI to toggle relays
+6. Server sends commands via TCP
+7. Pico updates GPIO states and optionally responds
+
+---
+
+## Roadmap
+
+- [ ] Add persistent storage (SQL or LiteDB)
+- [ ] Implement user authentication
+- [ ] Add real-time status and telemetry display
+- [ ] Define automation rules or timers
+- [ ] Improve mobile UI support
+
+---
+
+## License
+
+This project is licensed under the MIT License.
+
+---
+
+## Contributions
+
+Contributions, suggestions, and testing are welcome. This system is under active development for real-world RV use.
+
