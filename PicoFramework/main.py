@@ -1,49 +1,45 @@
+# main.py
 import uasyncio
 from pico_network import PicoNetwork
 from relay_toggle import RelayToggle
 
-# Global debug flag: True enables debug messages, False disables them
-DEBUG = True
-
-if DEBUG:
-    print("Debug mode is ON")
-
 async def main():
-    if DEBUG:
-        print("Starting PicoNetwork")
-    pico_net = PicoNetwork(debug=DEBUG)
+    print('Starting main')
+    # Initialize PicoNetwork
+    pico_net = PicoNetwork()
+
+    # Wait for network to connect and stabilize
+    print('Attempting network connection')
     await pico_net.start()
-
     if pico_net.is_connected():
-        if DEBUG:
-            print("PicoNetwork connected, setting up RelayToggle")
-        relay_toggle = RelayToggle(pico_net, pico_net.relay_configs, debug=DEBUG)
-        relay_toggle.setup()
-        await pico_net.send_device_info()
-        uasyncio.create_task(relay_toggle.send_queued_messages())
-        uasyncio.create_task(send_heartbeats(pico_net))
-        uasyncio.create_task(pico_net.handle_incoming(relay_toggle))
+        print('Initial network connection established')
+    else:
+        print('Initial network connection failed, proceeding with relay setup')
 
-        while True:
-            if not pico_net.is_connected():
-                if DEBUG:
-                    print("Connection lost, attempting to reconnect")
-                await pico_net.start()
-            await uasyncio.sleep(10)
+    # Initialize RelayToggle after network is settled
+    relay_toggle = RelayToggle(pico_net, pico_net.relay_configs)
+    relay_toggle.setup()
+    print('RelayToggle setup complete')
 
-async def send_heartbeats(pico_net):
+    # Run the message queue processor
+    uasyncio.create_task(relay_toggle.send_queued_messages())
+
+    # Monitor and maintain network connection
     while True:
-        if pico_net.is_connected():
-            if DEBUG:
-                print("Sending heartbeat")
-            await pico_net.send_heartbeat()
+        if not pico_net.is_connected():
+            print('Network disconnected, attempting to reconnect')
+            await pico_net.start()
+            if pico_net.is_connected():
+                print('Network reconnected successfully')
+            else:
+                print('Network reconnection failed, continuing')
         else:
-            if DEBUG:
-                print("Not connected, skipping heartbeat")
-        await uasyncio.sleep(30)  # Send heartbeat every 30 seconds
+            print('Network connection active')
+        await uasyncio.sleep(10)
 
 if __name__ == '__main__':
     try:
         uasyncio.run(main())
     except Exception as e:
         print(f'Main error: {e}')
+        print('Continuing execution to maintain relay functionality')
