@@ -1,4 +1,3 @@
-// RVNetworkLibrary/Services/NetworkService.cs
 using System;
 using System.Collections.Concurrent;
 using System.Net;
@@ -21,6 +20,7 @@ namespace RVNetworkLibrary.Services
         private ConcurrentDictionary<string, TcpClient> _connectedClients = new(); // Track clients by target_id
 
         public event Action<string, object> MessageReceived;
+        public event Action<string> DeviceDisconnected; // New event for disconnect notifications
 
         public NetworkService(int udpPort = 5000, int tcpPort = 5001)
         {
@@ -32,7 +32,7 @@ namespace RVNetworkLibrary.Services
         public async Task StartAsync(CancellationToken cancellationToken = default)
         {
             _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            await Task.WhenAll(StartUdpListenerAsync(), StartTcpServerAsync());
+            await Task.WhenAll(StartUdpListenerAsync(), StartTcpServerAsync(), HeartbeatMonitorAsync());
         }
 
         public void Stop()
@@ -44,6 +44,7 @@ namespace RVNetworkLibrary.Services
                 client.Close();
             }
             _connectedClients.Clear();
+            _devices.Clear();
         }
 
         private async Task StartUdpListenerAsync()
@@ -96,6 +97,7 @@ namespace RVNetworkLibrary.Services
                 try
                 {
                     TcpClient client = await _tcpListener.AcceptTcpClientAsync(_cts.Token);
+                    EnableTcpKeepAlives(client); // Enable keepalives for faster disconnect detection
                     _ = HandleTcpClientAsync(client); // Fire and forget
                 }
                 catch (OperationCanceledException) { }
@@ -124,11 +126,15 @@ namespace RVNetworkLibrary.Services
             {
                 while (client.Connected && !_cts.Token.IsCancellationRequested)
                 {
-                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token);
-                    if (bytesRead == 0) break;
+                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token).ConfigureAwait(false);
+                    if (bytesRead == 0)
+                    {
+                        Console.WriteLine($"TCP client from {remoteIp} disconnected (end of stream)");
+                        break;
+                    }
 
                     string receivedData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Console.WriteLine($"Raw data received from {remoteIp}: {receivedData}");
+                    //Console.WriteLine($"Raw data received from {remoteIp}: {receivedData}");
 
                     messageBuilder.Append(receivedData);
 
@@ -140,7 +146,7 @@ namespace RVNetworkLibrary.Services
                         messages = messages.Substring(nlIndex + 1);
                         messageBuilder = new StringBuilder(messages);
 
-                        Console.WriteLine($"Processing JSON from {remoteIp}: {json}");
+                        Console.WriteLine($"{DateTime.Now} - Processing JSON from {remoteIp}: {json}");
 
                         try
                         {
@@ -157,14 +163,26 @@ namespace RVNetworkLibrary.Services
                                         {
                                             targetId = id;
                                             _connectedClients[id] = client; // Store client for sending commands
-                                            _devices[id] = new DeviceState { Relays = message["relays"] };
+                                            _devices[id] = new DeviceState { Relays = message["relays"], LastHeartbeat = DateTime.Now };
                                         }
                                         break;
                                     case "heartbeat":
-                                        // Log or update liveness
+                                        if (targetId != null)
+                                        {
+                                            _devices[targetId].LastHeartbeat = DateTime.Now;
+                                        }
                                         break;
                                     case "status_update":
                                         // Update relay state in _devices
+                                        if (targetId != null && message.TryGetValue("label", out object labelObj) && labelObj is string label &&
+                                            message.TryGetValue("state", out object stateObj) && stateObj is string state)
+                                        {
+                                            // Assuming Relays is a Dictionary<string, string> for states; adjust as needed
+                                            if (_devices[targetId].Relays is Dictionary<string, string> relays)
+                                            {
+                                                relays[label] = state;
+                                            }
+                                        }
                                         break;
                                 }
                             }
@@ -176,6 +194,15 @@ namespace RVNetworkLibrary.Services
                     }
                 }
             }
+            catch (IOException ex) // Specific for socket errors
+            {
+                Console.WriteLine($"TCP client from {remoteIp} disconnected due to IO error: {ex.Message}");
+            }
+            catch (ObjectDisposedException ex)
+            {
+                Console.WriteLine($"TCP client from {remoteIp} disconnected due to disposal: {ex.Message}");
+            }
+            catch (OperationCanceledException) { }
             catch (Exception ex)
             {
                 Console.WriteLine($"TCP client error: {ex.Message}");
@@ -186,8 +213,36 @@ namespace RVNetworkLibrary.Services
                 if (targetId != null)
                 {
                     _connectedClients.TryRemove(targetId, out _);
+                    _devices.TryRemove(targetId, out _);
+                    DeviceDisconnected?.Invoke(targetId);
                 }
                 Console.WriteLine($"TCP client disconnected from {remoteIp}");
+            }
+        }
+
+        private async Task HeartbeatMonitorAsync()
+        {
+            while (!_cts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(10000, _cts.Token); // Check every 10s
+                    var now = DateTime.Now;
+                    foreach (var kvp in _devices.ToArray())
+                    {
+                        if (now - kvp.Value.LastHeartbeat > TimeSpan.FromSeconds(60)) // Timeout after 60s (2x heartbeat interval)
+                        {
+                            Console.WriteLine($"Device {kvp.Key} disconnected due to heartbeat timeout");
+                            if (_connectedClients.TryRemove(kvp.Key, out var client))
+                            {
+                                client.Close();
+                            }
+                            _devices.TryRemove(kvp.Key, out _);
+                            DeviceDisconnected?.Invoke(kvp.Key);
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { }
             }
         }
 
@@ -221,6 +276,27 @@ namespace RVNetworkLibrary.Services
             }
         }
 
+        private void EnableTcpKeepAlives(TcpClient client)
+        {
+            try
+            {
+                // Enable keepalive
+                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+
+                // Custom keepalive settings (Windows/Linux compatible via IOControl)
+                // Bytes: on (4 bytes), time (4 bytes, ms), interval (4 bytes, ms)
+                byte[] keepAliveValues = new byte[12];
+                BitConverter.GetBytes(1).CopyTo(keepAliveValues, 0); // Enable
+                BitConverter.GetBytes(30000).CopyTo(keepAliveValues, 4); // Idle time before probe (30s)
+                BitConverter.GetBytes(10000).CopyTo(keepAliveValues, 8); // Probe interval (10s)
+                client.Client.IOControl(IOControlCode.KeepAliveValues, keepAliveValues, null);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to set TCP keepalives: {ex.Message}");
+            }
+        }
+
         private string GetLocalIpAddress()
         {
             var host = Dns.GetHostEntry(Dns.GetHostName());
@@ -238,5 +314,6 @@ namespace RVNetworkLibrary.Services
     public class DeviceState
     {
         public object Relays { get; set; }
+        public DateTime LastHeartbeat { get; set; }
     }
 }

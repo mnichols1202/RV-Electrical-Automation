@@ -36,12 +36,12 @@ config = load_config()
 message_queue = []  # Shared list for status_updates
 queue_lock = _thread.allocate_lock()  # Lock for thread-safety
 
-# Setup relay_toggle (with shared queue/lock)
-relay_toggle = RelayToggle(None, config['relays'], message_queue, queue_lock)
-relay_toggle.setup()  # Sets up IRQs
-
 # Setup network (with shared queue/lock)
 network_manager = NetworkManager(config, message_queue, queue_lock)
+
+# Setup relay_toggle (with shared queue/lock, and comm = network_manager for publish)
+relay_toggle = RelayToggle(network_manager, config['relays'], message_queue, queue_lock)
+relay_toggle.setup()  # Sets up IRQs
 
 # Run network loop in a thread (non-blocking for relay async)
 _thread.start_new_thread(network_manager.run_network_loop, ())

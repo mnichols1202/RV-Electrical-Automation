@@ -10,7 +10,7 @@ class RelayToggle:
         self.relays = []
         self.message_queue = message_queue  # Shared with network
         self.queue_lock = queue_lock  # Shared lock for thread-safety
-        self.debounce_ms = 300
+        self.debounce_ms = 200
 
         print("Initializing RelayToggle")
         for config in relay_configs:
@@ -65,8 +65,9 @@ class RelayToggle:
                         relay_info['state'] = not relay_info['state']
                         relay_info['relay'].value(relay_info['state'])
                         relay_info['last_press'] = current_time
-                        message = self.get_relay_state(relay_info)
-                        print(f"Toggled: {message}")
+                        # Enqueue JSON dict instead of string
+                        message = {"type": "status_update", "label": relay_info['label'], "state": "ON" if relay_info['state'] else "OFF"}
+                        print(f"Toggled: {relay_info['label']} to {message['state']}")
                         with self.queue_lock:
                             self.message_queue.append(message)
                 break
@@ -77,8 +78,9 @@ class RelayToggle:
         for relay_info in self.relays:
             try:
                 relay_info['button'].irq(trigger=Pin.IRQ_RISING, handler=self.button_handler)
-                message = self.get_relay_state(relay_info)
-                print(f"Initial state: {message}")
+                # Enqueue initial JSON status
+                message = {"type": "status_update", "label": relay_info['label'], "state": "ON" if relay_info['state'] else "OFF"}
+                print(f"Initial state: {relay_info['label']} {message['state']}")
                 with self.queue_lock:
                     self.message_queue.append(message)
             except Exception as e:
