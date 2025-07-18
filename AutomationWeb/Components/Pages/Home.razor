@@ -1,12 +1,13 @@
 ﻿@page "/"
-
-@inject AutomationWeb.NetworkService NetworkService
+@using RVNetworkLibrary.Services
+@inject NetworkService NetworkService
+@implements IDisposable
 
 <PageTitle>Home</PageTitle>
 
-<h1>Hello, world!</h1>
+<h1>RV Electrical Automation</h1>
 
-Welcome to your new app.
+<p>Welcome to your RV control dashboard.</p>
 
 <h3>Received Network Messages</h3>
 <ul>
@@ -24,16 +25,32 @@ Welcome to your new app.
         NetworkService.MessageReceived += OnMessageReceived;
     }
 
-    private void OnMessageReceived(string msg)
+    private void OnMessageReceived(string type, object messageObj)
     {
         // Ensure UI update on the main thread
         InvokeAsync(() =>
         {
-            messages.Insert(0, msg);
-            if (messages.Count > 100) // Limit list size
-                messages.RemoveAt(messages.Count - 1);
-            StateHasChanged();
+            if (messageObj is Dictionary<string, object> message)
+            {
+                string formattedMessage = FormatMessage(type, message);
+                messages.Insert(0, formattedMessage);
+                if (messages.Count > 100) // Limit list size
+                    messages.RemoveAt(messages.Count - 1);
+                StateHasChanged();
+            }
         });
+    }
+
+    private string FormatMessage(string type, Dictionary<string, object> message)
+    {
+        string targetId = message.GetValueOrDefault("target_id")?.ToString() ?? "Unknown";
+        return type switch
+        {
+            "device_info" => $"Device {targetId}: Connected, Relays: {message.GetValueOrDefault("relays")?.ToString() ?? "None"}",
+            "heartbeat" => $"Heartbeat from {targetId}",
+            "status_update" => $"Status from {targetId}: {message.GetValueOrDefault("label")} is {message.GetValueOrDefault("state")}",
+            _ => $"Unknown message from {targetId}: {type}"
+        };
     }
 
     public void Dispose()
