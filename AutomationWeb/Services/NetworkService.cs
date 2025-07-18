@@ -1,32 +1,40 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
 using System.Net.NetworkInformation;
-using System.IO;
+using System.Text.Json;
+using MQTTnet;
+using MQTTnet.Server;
+using Microsoft.Extensions.Logging;
 
 namespace AutomationWeb
 {
     public class NetworkService
     {
         private readonly int _broadcastPort;
-        private readonly int _tcpPort;
+        private readonly int _mqttPort;  // New: MQTT broker port (default 1883)
         private readonly string _ackMessagePrefix;
+        private IMqttServer? _mqttServer;
+        private readonly ILogger<NetworkService>? _logger;  // Optional: Inject if using DI
+        public Dictionary<string, Dictionary<string, string>> DeviceStates { get; private set; } = new();  // e.g., { "PicoW1": { "relay1": "ON" } }
 
-        public event Action<string>? MessageReceived;
+        public event Action<string>? MessageReceived;  // Keep for raw logging if needed
 
-        public NetworkService(int broadcastPort = 5000, int tcpPort = 5001, string ackMessagePrefix = "ACK")
+        public NetworkService(int broadcastPort = 5000, int mqttPort = 1883, string ackMessagePrefix = "ACK", ILogger<NetworkService>? logger = null)
         {
             _broadcastPort = broadcastPort;
-            _tcpPort = tcpPort;
+            _mqttPort = mqttPort;
             _ackMessagePrefix = ackMessagePrefix;
+            _logger = logger;
         }
 
         public async Task RunAsync()
         {
             LogLocalIpAddresses();
-            await Task.WhenAll(ListenForBroadcastAsync(), StartTcpServerAsync());
+            await Task.WhenAll(ListenForBroadcastAsync(), StartMqttBrokerAsync());
         }
 
         private void LogLocalIpAddresses()
@@ -104,9 +112,9 @@ namespace AutomationWeb
 
                         if (message.Contains(":"))
                         {
-                            // Respond with ACK: <console_ip> <TcpPort>
+                            // Respond with ACK: <console_ip> <mqttPort>
                             string consoleIp = GetLocalIpAddress();
-                            string ackResponse = $"{_ackMessagePrefix}: {consoleIp} {_tcpPort}";
+                            string ackResponse = $"{_ackMessagePrefix}: {consoleIp} {_mqttPort}";
                             byte[] ackBytes = Encoding.UTF8.GetBytes(ackResponse);
                             await udpClient.SendAsync(ackBytes, ackBytes.Length, result.RemoteEndPoint);
                             Console.WriteLine($"Sent acknowledgment '{ackResponse}' to {result.RemoteEndPoint} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
@@ -138,81 +146,88 @@ namespace AutomationWeb
             }
         }
 
-        private async Task StartTcpServerAsync()
+        private async Task StartMqttBrokerAsync()
         {
-            TcpListener? listener = null;
             try
             {
-                listener = new TcpListener(IPAddress.Any, _tcpPort);
-                listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                listener.Start();
-                Console.WriteLine($"TCP server started on port {_tcpPort} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                var mqttFactory = new MqttFactory();
+                _mqttServer = mqttFactory.CreateMqttServer();
 
-                while (true)
-                {
-                    try
-                    {
-                        TcpClient client = await listener.AcceptTcpClientAsync();
-                        Console.WriteLine($"Accepted TCP connection from {client.Client.RemoteEndPoint} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                        _ = HandleTcpClientAsync(client); // Handle in background
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"TCP accept error: {ex.Message} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                    }
-                }
-            }
-            catch (SocketException se)
-            {
-                Console.WriteLine($"Failed to bind TCP port {_tcpPort}: {se.Message} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                Console.WriteLine("Try: (1) Check port usage with 'netstat -a -n -o' (Windows) or 'sudo netstat -tuln' (Linux). (2) Run as administrator.");
+                var options = new MqttServerOptionsBuilder()
+                    .WithDefaultEndpoint()
+                    .WithDefaultEndpointPort(_mqttPort)
+                    .Build();
+
+                _mqttServer.ClientConnectedAsync += OnClientConnected;
+                _mqttServer.ApplicationMessageNotConsumedAsync += OnMessageReceived;  // Handle incoming messages
+
+                await _mqttServer.StartAsync(options);
+                Console.WriteLine($"MQTT broker started on port {_mqttPort} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"TCP server error: {ex.Message} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-            }
-            finally
-            {
-                listener?.Stop();
-                Console.WriteLine($"TCP server stopped at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                Console.WriteLine($"MQTT broker error: {ex.Message} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             }
         }
 
-        private async Task HandleTcpClientAsync(TcpClient client)
+        private Task OnClientConnected(MqttServerClientConnectedEventArgs args)
         {
+            Console.WriteLine($"MQTT client connected: {args.ClientId} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            return Task.CompletedTask;
+        }
+
+        private Task OnMessageReceived(MqttApplicationMessageInterceptorContext context)
+        {
+            var topic = context.ApplicationMessage.Topic;
+            var payload = Encoding.UTF8.GetString(context.ApplicationMessage.PayloadSegment);
+            Console.WriteLine($"Received MQTT message on {topic}: {payload} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+
             try
             {
-                using NetworkStream stream = client.GetStream();
-                byte[] buffer = new byte[64];
-                while (client.Connected)
+                var message = JsonSerializer.Deserialize<Dictionary<string, object>>(payload);
+                if (message != null && message.TryGetValue("type", out var typeObj) && typeObj.ToString() == "status_update")
                 {
-                    try
-                    {
-                        int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-                        if (bytesRead == 0) // Connection closed
-                            break;
-                        string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                        MessageReceived?.Invoke($"TCP: '{message}' from {client.Client.RemoteEndPoint} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                        Console.WriteLine($"Received from TCP client: '{message}' from {client.Client.RemoteEndPoint} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                    // Update device states (e.g., for UI binding)
+                    var deviceId = message["device_id"].ToString();
+                    var componentId = message["component_id"].ToString();
+                    var state = message["state"].ToString();
 
-                        byte[] response = Encoding.UTF8.GetBytes($"Server received: {message}");
-                        await stream.WriteAsync(response, 0, response.Length);
-                        Console.WriteLine($"Sent response to TCP client: 'Server received: {message}' at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                    }
-                    catch (IOException)
+                    if (!DeviceStates.ContainsKey(deviceId))
                     {
-                        break;
+                        DeviceStates[deviceId] = new Dictionary<string, string>();
                     }
+                    DeviceStates[deviceId][componentId] = state;
                 }
+                // Handle other types like device_info, heartbeat similarly
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"TCP client error: {ex.Message} at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                Console.WriteLine($"Message parse error: {ex.Message}");
             }
-            finally
+
+            return Task.CompletedTask;
+        }
+
+        public async Task SendCommandAsync(string deviceId, string componentId, string state)
+        {
+            if (_mqttServer == null) return;
+
+            var message = new MqttApplicationMessageBuilder()
+                .WithTopic($"rv/{deviceId}/commands")
+                .WithPayload(JsonSerializer.Serialize(new { type = "command", device_id = deviceId, component_id = componentId, state }))
+                .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce)
+                .Build();
+
+            await _mqttServer.InjectApplicationMessage(new InjectedMqttApplicationMessage(message));
+            Console.WriteLine($"Sent command to {deviceId}/{componentId}: {state}");
+        }
+
+        // Add StopAsync if needed to shutdown broker
+        public async Task StopAsync()
+        {
+            if (_mqttServer != null)
             {
-                client.Close();
-                Console.WriteLine($"TCP client connection closed at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                await _mqttServer.StopAsync();
             }
         }
     }
