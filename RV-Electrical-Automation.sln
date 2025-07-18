@@ -15,6 +15,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "PicoAutomation", "PicoAutom
 		PicoAutomation\relay_toggle.py = PicoAutomation\relay_toggle.py
 	EndProjectSection
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RVNetworkLibrary", "RVNetworkLibrary\RVNetworkLibrary.csproj", "{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -49,6 +51,18 @@ Global
 		{75C225DD-57AA-4CAB-B7D4-98BBA84787C6}.Release|x64.Build.0 = Release|Any CPU
 		{75C225DD-57AA-4CAB-B7D4-98BBA84787C6}.Release|x86.ActiveCfg = Release|Any CPU
 		{75C225DD-57AA-4CAB-B7D4-98BBA84787C6}.Release|x86.Build.0 = Release|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Debug|x64.Build.0 = Debug|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Debug|x86.Build.0 = Debug|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Release|x64.ActiveCfg = Release|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Release|x64.Build.0 = Release|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Release|x86.ActiveCfg = Release|Any CPU
+		{0C58708F-0A32-4C93-AF4D-5DC43D0E0EAE}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
