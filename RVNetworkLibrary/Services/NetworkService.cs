@@ -18,6 +18,7 @@ namespace RVNetworkLibrary.Services
         private CancellationTokenSource _cts = new();
         private TcpListener _tcpListener;
         private ConcurrentDictionary<string, DeviceState> _devices = new();
+        private ConcurrentDictionary<string, TcpClient> _connectedClients = new(); // Track clients by target_id
 
         public event Action<string, object> MessageReceived;
 
@@ -38,6 +39,11 @@ namespace RVNetworkLibrary.Services
         {
             _cts.Cancel();
             _tcpListener?.Stop();
+            foreach (var client in _connectedClients.Values)
+            {
+                client.Close();
+            }
+            _connectedClients.Clear();
         }
 
         private async Task StartUdpListenerAsync()
@@ -90,7 +96,7 @@ namespace RVNetworkLibrary.Services
                 try
                 {
                     TcpClient client = await _tcpListener.AcceptTcpClientAsync(_cts.Token);
-                    _ = HandleTcpClientAsync(client);
+                    _ = HandleTcpClientAsync(client); // Fire and forget
                 }
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
@@ -108,43 +114,64 @@ namespace RVNetworkLibrary.Services
             Console.WriteLine($"TCP client connected from {remoteIp}");
 
             using NetworkStream stream = client.GetStream();
-            using StreamReader reader = new(stream);
-            using StreamWriter writer = new(stream) { AutoFlush = true };
 
-            string buffer = string.Empty;
+            byte[] buffer = new byte[1024];
+            StringBuilder messageBuilder = new StringBuilder();
+
+            string targetId = null; // To be set from device_info
+
             try
             {
                 while (client.Connected && !_cts.Token.IsCancellationRequested)
                 {
-                    string line = await reader.ReadLineAsync();
-                    if (line == null) break;
-                    buffer += line;
+                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token);
+                    if (bytesRead == 0) break;
 
-                    while (buffer.Contains("\n"))
+                    string receivedData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    Console.WriteLine($"Raw data received from {remoteIp}: {receivedData}");
+
+                    messageBuilder.Append(receivedData);
+
+                    string messages = messageBuilder.ToString();
+                    int nlIndex;
+                    while ((nlIndex = messages.IndexOf('\n')) != -1)
                     {
-                        int nlIndex = buffer.IndexOf('\n');
-                        string json = buffer.Substring(0, nlIndex);
-                        buffer = buffer.Substring(nlIndex + 1);
+                        string json = messages.Substring(0, nlIndex);
+                        messages = messages.Substring(nlIndex + 1);
+                        messageBuilder = new StringBuilder(messages);
 
-                        var message = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
-                        if (message.TryGetValue("type", out object typeObj) && typeObj is string type)
+                        Console.WriteLine($"Processing JSON from {remoteIp}: {json}");
+
+                        try
                         {
-                            Console.WriteLine($"Received {type} from {remoteIp}");
-                            MessageReceived?.Invoke(type, message);
-
-                            switch (type)
+                            var message = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
+                            if (message.TryGetValue("type", out object typeObj) && typeObj is string type)
                             {
-                                case "device_info":
-                                    if (message.TryGetValue("target_id", out object idObj) && idObj is string targetId)
-                                    {
-                                        _devices[targetId] = new DeviceState { Relays = message["relays"] };
-                                    }
-                                    break;
-                                case "heartbeat":
-                                    break;
-                                case "status_update":
-                                    break;
+                                Console.WriteLine($"Received {type} from {remoteIp}: {json}");
+                                MessageReceived?.Invoke(type, message);
+
+                                switch (type)
+                                {
+                                    case "device_info":
+                                        if (message.TryGetValue("target_id", out object idObj) && idObj is string id)
+                                        {
+                                            targetId = id;
+                                            _connectedClients[id] = client; // Store client for sending commands
+                                            _devices[id] = new DeviceState { Relays = message["relays"] };
+                                        }
+                                        break;
+                                    case "heartbeat":
+                                        // Log or update liveness
+                                        break;
+                                    case "status_update":
+                                        // Update relay state in _devices
+                                        break;
+                                }
                             }
+                        }
+                        catch (JsonException ex)
+                        {
+                            Console.WriteLine($"JSON parse error: {ex.Message}");
                         }
                     }
                 }
@@ -156,14 +183,42 @@ namespace RVNetworkLibrary.Services
             finally
             {
                 client.Close();
+                if (targetId != null)
+                {
+                    _connectedClients.TryRemove(targetId, out _);
+                }
                 Console.WriteLine($"TCP client disconnected from {remoteIp}");
             }
         }
 
         public async Task SendCommandAsync(string targetId, string label, string state)
         {
-            Console.WriteLine($"Sending command: {label} to {state} for {targetId}");
-            // Placeholder for TCP client sending
+            if (_connectedClients.TryGetValue(targetId, out TcpClient client) && client.Connected)
+            {
+                try
+                {
+                    using NetworkStream stream = client.GetStream();
+                    using StreamWriter writer = new(stream) { AutoFlush = true };
+
+                    var command = new Dictionary<string, string>
+                    {
+                        { "type", "command" },
+                        { "label", label },
+                        { "state", state }
+                    };
+                    string json = JsonSerializer.Serialize(command);
+                    await writer.WriteLineAsync(json);
+                    Console.WriteLine($"Sent command: {label} to {state} for {targetId}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Send command error: {ex.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"No connected client for {targetId}");
+            }
         }
 
         private string GetLocalIpAddress()

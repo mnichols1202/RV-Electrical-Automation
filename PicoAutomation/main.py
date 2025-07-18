@@ -1,6 +1,7 @@
-# main.py (paired with pico_network.py for Wi-Fi + UDP testing)
+# main.py (paired with pico_network.py for Wi-Fi + UDP + TCP, with simulated toggles)
 import json
 import time
+import _thread  # For lock and simulation thread
 from pico_network import NetworkManager
 
 def load_config(filename='config.json'):
@@ -30,10 +31,28 @@ def load_config(filename='config.json'):
 
 config = load_config()
 
-network_manager = NetworkManager(config)  # Mirrors RelayToggle init
+message_queue = []  # List-based queue for status_updates (simulated now, real from relay_toggle later)
+queue_lock = _thread.allocate_lock()  # Lock for thread-safe access
 
-# Optional: Scan before running loop
-# network_manager.scan_wifi()
+network_manager = NetworkManager(config, message_queue, queue_lock)
 
-# Run the self-contained network loop (sync for standalone; thread for integration)
+# Simulation loop for mock button toggles (remove when integrating relay_toggle.py)
+def simulate_toggles():
+    relay_labels = [relay['label'] for relay in config['relays']]  # Use labels from config
+    state = "OFF"  # Toggle state
+    i = 0
+    while True:
+        label = relay_labels[i % len(relay_labels)]  # Cycle through relays
+        state = "ON" if state == "OFF" else "OFF"
+        message = {"type": "status_update", "label": label, "state": state}
+        with queue_lock:
+            message_queue.append(message)  # Thread-safe enqueue
+        print(f"Simulated toggle: {label} to {state}")
+        i += 1
+        time.sleep(10)  # Simulate every 10s
+
+# Start simulation in a separate thread (non-blocking for network loop)
+_thread.start_new_thread(simulate_toggles, ())
+
+# Run the self-contained network loop
 network_manager.run_network_loop()

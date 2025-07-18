@@ -1,4 +1,4 @@
-# pico_network.py (version: Wi-Fi + UDP discovery, fixed bind to Pico IP)
+# pico_network.py (version: Wi-Fi + UDP + TCP connection, with thread-safe list queue)
 import network
 import socket
 import time
@@ -7,7 +7,7 @@ import rp2  # For country code
 from machine import Pin
 
 class NetworkManager:
-    def __init__(self, network_config):
+    def __init__(self, network_config, message_queue, queue_lock):
         """Initialize with config, mirroring RelayToggle style."""
         self.ssid = network_config['wifi_ssid']
         self.password = network_config['wifi_password']
@@ -19,6 +19,10 @@ class NetworkManager:
         self.led = Pin("LED", Pin.OUT)
         self.server_ip = None
         self.server_tcp_port = None
+        self.message_queue = message_queue  # Shared list for status_updates
+        self.queue_lock = queue_lock  # Shared lock for thread-safety
+        self.tcp_sock = None
+        self.connected = False
         print("Initialized NetworkManager")
 
     def failure_blink(self, duration=10, blink_interval=0.1):
@@ -163,8 +167,98 @@ class NetworkManager:
         self.failure_blink(duration=5)
         return False
 
+    def tcp_connect(self):
+        """Establish TCP connection and send device_info."""
+        if not self.server_ip or not self.server_tcp_port:
+            return False
+
+        self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self.tcp_sock.connect((self.server_ip, self.server_tcp_port))
+            self.connected = True
+            print(f"TCP connected to {self.server_ip}:{self.server_tcp_port}")
+            self.led.value(1)  # Solid LED on connected
+
+            # Send device_info
+            device_info = {
+                "type": "device_info",
+                "target_id": self.target_id,
+                "relays": self.relays
+            }
+            self.tcp_sock.sendall(json.dumps(device_info).encode() + b'\n')
+            return True
+        except OSError as e:
+            print(f"TCP connect failed: {e}")
+            self.tcp_sock.close()
+            self.tcp_sock = None
+            self.connected = False
+            self.led.value(0)
+            return False
+
+    def tcp_send_loop(self):
+        """Send queued messages and heartbeats."""
+        last_heartbeat = 0
+        heartbeat_interval = 30  # seconds
+        
+        while self.connected:
+            # Send heartbeat
+            if time.time() - last_heartbeat > heartbeat_interval:
+                heartbeat = {"type": "heartbeat", "target_id": self.target_id}
+                try:
+                    self.tcp_sock.sendall(json.dumps(heartbeat).encode() + b'\n')
+                    print("Sent heartbeat")
+                    last_heartbeat = time.time()
+                except OSError:
+                    self.connected = False
+                    break
+            
+            # Send queued status_updates (thread-safe with lock)
+            with self.queue_lock:
+                if self.message_queue:
+                    msg = self.message_queue.pop(0)
+                    try:
+                        self.tcp_sock.sendall(json.dumps(msg).encode() + b'\n')
+                        print(f"Sent status_update: {msg}")
+                    except OSError:
+                        self.connected = False
+                        break
+            
+            time.sleep(1)  # Sleep 1s to reduce polling
+
+    def tcp_receive_loop(self):
+        """Receive and handle incoming commands."""
+        buffer = b''
+        while self.connected:
+            try:
+                self.tcp_sock.settimeout(1)  # Non-blocking recv with 1s timeout
+                data = self.tcp_sock.recv(1024)
+                self.tcp_sock.settimeout(None)  # Reset
+                if not data:
+                    self.connected = False
+                    break
+                buffer += data
+                while b'\n' in buffer:
+                    line, buffer = buffer.split(b'\n', 1)
+                    try:
+                        msg = json.loads(line.decode())
+                        print(f"Received message: {msg}")
+                        if msg.get("type") == "command":
+                            label = msg.get("label")
+                            state = msg.get("state")
+                            # Execute toggle (assume relay_toggle has this function)
+                            from relay_toggle import toggle_relay
+                            toggle_relay(label, state)
+                            print(f"Executed command: {label} to {state}")
+                    except json.JSONDecodeError:
+                        print("Invalid JSON received")
+            except OSError as e:
+                if e.args[0] == 110:  # ETIMEDOUT, continue loop
+                    continue
+                self.connected = False
+            time.sleep(0.1)  # Short yield
+
     def run_network_loop(self):
-        """Self-contained loop for Wi-Fi and UDP, mirroring relay's internal handling."""
+        """Self-contained loop for Wi-Fi, UDP, and TCP."""
         backoff = 1
         max_backoff = 60
 
@@ -181,12 +275,23 @@ class NetworkManager:
                 print(f"WiFi stable! IP: {ip}")
                 if self.udp_announce(ip):
                     print(f"UDP discovery complete! Server at {self.server_ip}:{self.server_tcp_port}")
-                    while True:
-                        time.sleep(10)
-                        if not network.WLAN(network.STA_IF).isconnected():
-                            print("WiFi disconnected. Reconnecting...")
-                            backoff = 1
-                            break
+                    if self.tcp_connect():
+                        # Run send and receive synchronously with simulation
+                        while self.connected:
+                            self.tcp_send_loop()
+                            self.tcp_receive_loop()
+                        # Connection lost, reconnect
+                        print("TCP disconnected. Reconnecting...")
+                        self.tcp_sock.close()
+                        self.tcp_sock = None
+                        self.connected = False
+                        self.led.value(0)
+                        time.sleep(backoff)
+                        backoff = min(backoff * 2, max_backoff)
+                    else:
+                        print(f"TCP failed. Backoff sleep: {backoff}s")
+                        time.sleep(backoff)
+                        backoff = min(backoff * 2, max_backoff)
                 else:
                     print(f"UDP failed. Backoff sleep: {backoff}s")
                     time.sleep(backoff)
