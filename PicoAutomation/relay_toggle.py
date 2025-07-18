@@ -4,12 +4,13 @@ import time
 import uasyncio
 
 class RelayToggle:
-    def __init__(self, comm, relay_configs):
+    def __init__(self, comm, relay_configs, message_queue, queue_lock):
         """Initialize buttons and relays based on configurations."""
         self.comm = comm  # Network communication object (optional, can be set later)
         self.relays = []
-        self.message_queue = []
-        self.debounce_ms = 200
+        self.message_queue = message_queue  # Shared with network
+        self.queue_lock = queue_lock  # Shared lock for thread-safety
+        self.debounce_ms = 300
 
         print("Initializing RelayToggle")
         for config in relay_configs:
@@ -44,10 +45,13 @@ class RelayToggle:
         """Send messages from the queue asynchronously if comm is available."""
         print('Starting send_queued_messages loop')
         while True:
-            if self.message_queue and self.comm and self.comm.is_connected():
-                message = self.message_queue.pop(0)
-                print(f"Sending message: {message}")
-                await self.comm.publish(message)  # Use comm's publish method
+            with self.queue_lock:
+                if self.message_queue:
+                    message = self.message_queue.pop(0)
+                    print(f"Sending message: {message}")
+                    # Use comm's publish if available (for network)
+                    if self.comm and self.comm.is_connected():
+                        await self.comm.publish(message)  # Use comm's publish method
             await uasyncio.sleep(0.1)
 
     def button_handler(self, pin):
@@ -63,7 +67,8 @@ class RelayToggle:
                         relay_info['last_press'] = current_time
                         message = self.get_relay_state(relay_info)
                         print(f"Toggled: {message}")
-                        self.message_queue.append(message)
+                        with self.queue_lock:
+                            self.message_queue.append(message)
                 break
 
     def setup(self):
@@ -74,6 +79,7 @@ class RelayToggle:
                 relay_info['button'].irq(trigger=Pin.IRQ_RISING, handler=self.button_handler)
                 message = self.get_relay_state(relay_info)
                 print(f"Initial state: {message}")
-                self.message_queue.append(message)
+                with self.queue_lock:
+                    self.message_queue.append(message)
             except Exception as e:
                 print(f"IRQ setup failed for {relay_info['label']}: {e}")
