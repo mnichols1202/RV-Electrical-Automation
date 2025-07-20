@@ -8,21 +8,28 @@ from pico_network import NetworkManager
 
 def load_config(filename='config.json'):
     defaults = {
-        'wifi_ssid': '',
-        'wifi_password': '',
-        'target_id': 'default_pico',
-        'UdpPort': 5000,
-        'TcpPort': 5001,
-        'relays': []
+        'config': {
+            'wifi_ssid': '',
+            'wifi_password': '',
+            'target_id': 'default_pico',
+            'UdpPort': 5000,
+            'TcpPort': 5001
+        },
+        'devices': []
     }
     try:
         with open(filename, 'r') as f:
             config = json.load(f)
         print(f"Loaded config")
-        required_keys = ['wifi_ssid', 'wifi_password', 'target_id', 'UdpPort', 'TcpPort', 'relays']
+        required_keys = ['config', 'devices']  # Top-level keys
         for key in required_keys:
             if key not in config:
                 raise ValueError(f"Missing key: {key}")
+        # Validate nested 'config' keys
+        nested_required = ['wifi_ssid', 'wifi_password', 'target_id', 'UdpPort', 'TcpPort']
+        for key in nested_required:
+            if key not in config['config']:
+                raise ValueError(f"Missing nested key in 'config': {key}")
         return config
     except OSError:
         print("File not found. Defaults.")
@@ -36,18 +43,20 @@ config = load_config()
 message_queue = []  # Shared list for status_updates
 queue_lock = _thread.allocate_lock()  # Lock for thread-safety
 
-# Setup network (with shared queue/lock)
+# Setup network (with shared queue/lock); pass full config
 network_manager = NetworkManager(config, message_queue, queue_lock)
 
-# Setup relay_toggle (with shared queue/lock, and comm = network_manager for publish)
-relay_toggle = RelayToggle(network_manager, config['relays'], message_queue, queue_lock)
+# Setup relay_toggle (with shared queue/lock, and comm = network_manager for publish if needed)
+relay_toggle = RelayToggle(network_manager, config['devices'], message_queue, queue_lock)
 relay_toggle.setup()  # Sets up IRQs
 
-# Run network loop in a thread (non-blocking for relay async)
+# Link relay_toggle instance to network_manager
+network_manager.relay_toggle = relay_toggle
+
+# Run network loop in a thread (non-blocking)
 _thread.start_new_thread(network_manager.run_network_loop, ())
 
-# Run relay async loop
-async def main_loop():
-    await relay_toggle.send_queued_messages()
-
-uasyncio.run(main_loop())
+# No need for main_loop/uasyncio.run if not using async queuing; tcp_send_loop handles it
+# If you add async tasks later, reinstate as needed
+while True:
+    time.sleep(1)  # Keep main thread alive

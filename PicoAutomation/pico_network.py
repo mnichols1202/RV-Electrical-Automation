@@ -9,13 +9,14 @@ from machine import Pin
 class NetworkManager:
     def __init__(self, network_config, message_queue, queue_lock):
         """Initialize with config, mirroring RelayToggle style."""
-        self.ssid = network_config['wifi_ssid']
-        self.password = network_config['wifi_password']
-        self.country_code = network_config.get('country_code', 'US')
-        self.target_id = network_config['target_id']
-        self.udp_port = network_config['UdpPort']
-        self.tcp_port = network_config['TcpPort']
-        self.devices = network_config['devices']  # Changed from 'relays' to 'devices' for extensibility
+        setup_config = network_config['config']  # Access nested 'config'
+        self.ssid = setup_config['wifi_ssid']
+        self.password = setup_config['wifi_password']
+        self.country_code = setup_config.get('country_code', 'US')
+        self.target_id = setup_config['target_id']
+        self.udp_port = setup_config['UdpPort']
+        self.tcp_port = setup_config['TcpPort']
+        self.devices = network_config['devices']  # Remains top-level
         self.led = Pin("LED", Pin.OUT)
         self.server_ip = None
         self.server_tcp_port = None
