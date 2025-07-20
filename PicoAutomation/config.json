@@ -4,7 +4,9 @@
     "wifi_password": "J0shua07",
     "target_id": "PicoW1",
     "UdpPort": 5000,
-    "TcpPort": 5001
+    "TcpPort": 5001,
+    "ntpserver": "pool.ntp.org",
+    "timezone": -7 
   },
   "devices": [
     {

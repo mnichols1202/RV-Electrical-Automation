@@ -5,6 +5,7 @@ import time
 import json
 import rp2  # For country code
 from machine import Pin
+import ntptime  # For NTP sync
 
 class NetworkManager:
     def __init__(self, network_config, message_queue, queue_lock):
@@ -16,6 +17,8 @@ class NetworkManager:
         self.target_id = setup_config['target_id']
         self.udp_port = setup_config['UdpPort']
         self.tcp_port = setup_config['TcpPort']
+        self.ntpserver = setup_config.get('ntpserver', 'pool.ntp.org')  // Default if not set
+        self.timezone_offset = setup_config.get('timezone', 0) * 3600  // Convert hours to seconds
         self.devices = network_config['devices']  # Remains top-level
         self.led = Pin("LED", Pin.OUT)
         self.server_ip = None
@@ -29,10 +32,14 @@ class NetworkManager:
         print("Initialized NetworkManager")
 
     def create_message(self, msg_type, data):
+        # Get UTC time, add timezone offset, then format
+        adjusted_time = time.time() + self.timezone_offset
+        lt = time.localtime(adjusted_time)  # (year, month, mday, hour, minute, second, weekday, yearday)
+        timestamp = f"{lt[0]:04d}-{lt[1]:02d}-{lt[2]:02d}T{lt[3]:02d}:{lt[4]:02d}:{lt[5]:02d}"
         return {
             "type": msg_type,
             "target_id": self.target_id,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+            "timestamp": timestamp,
             "data": data,
             "version": 1
         }
@@ -74,8 +81,9 @@ class NetworkManager:
             time.sleep(0.2)
             rp2.country(self.country_code)
             wlan.active(True)
-            time.sleep(1)
+            time.sleep(2)  # Increased delay after active(True) to avoid initial -1
             wlan.config(pm=0xa11140)
+            time.sleep(0.5)  # Short delay before connect
             wlan.connect(self.ssid, self.password)
             
             start_time = time.time()
@@ -103,6 +111,13 @@ class NetworkManager:
                 ip = wlan.ifconfig()[0]
                 print(f"Connected to WiFi. IP: {ip}. Settling for {settle_delay}s...")
                 time.sleep(settle_delay + 1)
+                # Sync time with NTP after successful connect
+                try:
+                    ntptime.host = self.ntpserver  # Use configured NTP server
+                    ntptime.settime()  # Sync RTC to UTC
+                    print(f"NTP time sync successful from {self.ntpserver}")
+                except OSError as e:
+                    print(f"NTP sync failed: {e}. Using local time.")
                 self.led.value(1)
                 return ip
             else:

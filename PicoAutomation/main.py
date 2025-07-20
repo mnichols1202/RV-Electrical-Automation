@@ -13,7 +13,9 @@ def load_config(filename='config.json'):
             'wifi_password': '',
             'target_id': 'default_pico',
             'UdpPort': 5000,
-            'TcpPort': 5001
+            'TcpPort': 5001,
+            'ntpserver': 'pool.ntp.org',
+            'timezone': 0  // Default UTC
         },
         'devices': []
     }
@@ -26,7 +28,7 @@ def load_config(filename='config.json'):
             if key not in config:
                 raise ValueError(f"Missing key: {key}")
         # Validate nested 'config' keys
-        nested_required = ['wifi_ssid', 'wifi_password', 'target_id', 'UdpPort', 'TcpPort']
+        nested_required = ['wifi_ssid', 'wifi_password', 'target_id', 'UdpPort', 'TcpPort', 'ntpserver', 'timezone']
         for key in nested_required:
             if key not in config['config']:
                 raise ValueError(f"Missing nested key in 'config': {key}")
@@ -56,7 +58,6 @@ network_manager.relay_toggle = relay_toggle
 # Run network loop in a thread (non-blocking)
 _thread.start_new_thread(network_manager.run_network_loop, ())
 
-# No need for main_loop/uasyncio.run if not using async queuing; tcp_send_loop handles it
-# If you add async tasks later, reinstate as needed
+# Keep main thread alive (no async loop needed since queuing is handled in network thread)
 while True:
-    time.sleep(1)  # Keep main thread alive
+    time.sleep(1)
