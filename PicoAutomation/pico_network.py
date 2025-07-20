@@ -15,7 +15,7 @@ class NetworkManager:
         self.target_id = network_config['target_id']
         self.udp_port = network_config['UdpPort']
         self.tcp_port = network_config['TcpPort']
-        self.relays = network_config['relays']
+        self.devices = network_config['devices']  # Changed from 'relays' to 'devices' for extensibility
         self.led = Pin("LED", Pin.OUT)
         self.server_ip = None
         self.server_tcp_port = None
@@ -23,7 +23,18 @@ class NetworkManager:
         self.queue_lock = queue_lock  # Shared lock for thread-safety
         self.tcp_sock = None
         self.connected = False
+        self.relay_toggle = None  # Set this after instantiation, e.g., network.relay_toggle = relay_instance
+        self.start_time = time.time()  # For uptime in heartbeats
         print("Initialized NetworkManager")
+
+    def create_message(self, msg_type, data):
+        return {
+            "type": msg_type,
+            "target_id": self.target_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+            "data": data,
+            "version": 1
+        }
 
     def failure_blink(self, duration=10, blink_interval=0.1):
         start_time = time.time()
@@ -132,11 +143,7 @@ class NetworkManager:
                     return False
         
         try:
-            message = json.dumps({
-                "type": "announce",
-                "target_id": self.target_id,
-                "ip": ip
-            }).encode()
+            message = json.dumps(self.create_message("config", {"action": "announce", "ip": ip})).encode()
             
             for attempt in range(1, max_attempts + 1):
                 self.led.value(1)
@@ -151,9 +158,9 @@ class NetworkManager:
                 try:
                     data, addr = sock.recvfrom(1024)
                     response = json.loads(data.decode())
-                    if response.get("type") == "ack":
-                        self.server_ip = response["server_ip"]
-                        self.server_tcp_port = response["tcp_port"]
+                    if response.get("type") == "config" and response.get("data", {}).get("action") == "ack":
+                        self.server_ip = response["data"]["server_ip"]
+                        self.server_tcp_port = response["data"]["tcp_port"]
                         print(f"Received ACK: Server IP {self.server_ip}:{self.server_tcp_port}")
                         return True
                 except OSError as e:
@@ -179,12 +186,8 @@ class NetworkManager:
             print(f"TCP connected to {self.server_ip}:{self.server_tcp_port}")
             self.led.value(1)  # Solid LED on connected
 
-            # Send device_info
-            device_info = {
-                "type": "device_info",
-                "target_id": self.target_id,
-                "relays": self.relays
-            }
+            # Send device_info with "devices" array
+            device_info = self.create_message("config", {"action": "device_info", "devices": self.devices})
             self.tcp_sock.sendall(json.dumps(device_info).encode() + b'\n')
             return True
         except OSError as e:
@@ -203,7 +206,8 @@ class NetworkManager:
         while self.connected:
             # Send heartbeat
             if time.time() - last_heartbeat > heartbeat_interval:
-                heartbeat = {"type": "heartbeat", "target_id": self.target_id}
+                heartbeat_data = {"action": "heartbeat", "uptime": int(time.time() - self.start_time)}
+                heartbeat = self.create_message("status", heartbeat_data)
                 try:
                     self.tcp_sock.sendall(json.dumps(heartbeat).encode() + b'\n')
                     print("Sent heartbeat")
@@ -216,12 +220,23 @@ class NetworkManager:
             with self.queue_lock:
                 if self.message_queue:
                     msg = self.message_queue.pop(0)
-                    try:
-                        self.tcp_sock.sendall(json.dumps(msg).encode() + b'\n')
-                        print(f"Sent status_update: {msg}")
-                    except OSError:
-                        self.connected = False
-                        break
+                    if msg.get("type") == "status":
+                        # Wrap with common fields; expect msg["data"]["devices"] for extensibility
+                        std_msg = self.create_message("status", msg["data"])
+                        try:
+                            self.tcp_sock.sendall(json.dumps(std_msg).encode() + b'\n')
+                            print(f"Sent standardized status: {std_msg}")
+                        except OSError:
+                            self.connected = False
+                            break
+                    else:
+                        # Fallback for other types
+                        try:
+                            self.tcp_sock.sendall(json.dumps(msg).encode() + b'\n')
+                            print(f"Sent message: {msg}")
+                        except OSError:
+                            self.connected = False
+                            break
             
             time.sleep(1)  # Sleep 1s to reduce polling
 
@@ -243,12 +258,16 @@ class NetworkManager:
                         msg = json.loads(line.decode())
                         print(f"Received message: {msg}")
                         if msg.get("type") == "command":
-                            label = msg.get("label")
-                            state = msg.get("state")
-                            # Execute toggle (assume relay_toggle has this function)
-                            from relay_toggle import toggle_relay
-                            toggle_relay(label, state)
-                            print(f"Executed command: {label} to {state}")
+                            data = msg.get("data", {})
+                            device_type = data.get("device_type")
+                            if device_type == "relay":  # Check for relay; extensible for others
+                                label = data.get("label")
+                                state = data.get("state")
+                                if self.relay_toggle:
+                                    self.relay_toggle.toggle_relay(label, state)  # Use instance method
+                                else:
+                                    print("RelayToggle instance not set")
+                            # Future: elif device_type == "stepper": etc.
                     except json.JSONDecodeError:
                         print("Invalid JSON received")
             except OSError as e:

@@ -59,24 +59,36 @@ namespace RVNetworkLibrary.Services
                 {
                     UdpReceiveResult result = await udpClient.ReceiveAsync(_cts.Token);
                     string json = Encoding.UTF8.GetString(result.Buffer);
-                    var message = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+                    var message = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
 
-                    if (message.TryGetValue("type", out string type) && type == "announce")
+                    if (message.TryGetValue("type", out object typeObj) && typeObj.ToString() == "config" &&
+                        message.TryGetValue("data", out object dataObj) && dataObj is JsonElement dataElem)
                     {
-                        string targetId = message["target_id"];
-                        string picoIp = message["ip"];
-                        Console.WriteLine($"Announce from {targetId} at {picoIp}");
-
-                        var ack = new Dictionary<string, object>
+                        var data = JsonSerializer.Deserialize<Dictionary<string, object>>(dataElem.GetRawText());
+                        if (data.TryGetValue("action", out object actionObj) && actionObj.ToString() == "announce")
                         {
-                            { "type", "ack" },
-                            { "server_ip", _localIp },
-                            { "tcp_port", _tcpPort }
-                        };
-                        string ackJson = JsonSerializer.Serialize(ack);
-                        byte[] ackBytes = Encoding.UTF8.GetBytes(ackJson);
-                        await udpClient.SendAsync(ackBytes, ackBytes.Length, result.RemoteEndPoint);
-                        Console.WriteLine($"Sent ACK to {result.RemoteEndPoint}");
+                            string targetId = message["target_id"].ToString();
+                            string picoIp = data["ip"].ToString();
+                            Console.WriteLine($"Announce from {targetId} at {picoIp}");
+
+                            var ackData = new Dictionary<string, object>
+                            {
+                                { "action", "ack" },
+                                { "server_ip", _localIp },
+                                { "tcp_port", _tcpPort }
+                            };
+                            var ack = new Dictionary<string, object>
+                            {
+                                { "type", "config" },
+                                { "timestamp", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss") },
+                                { "data", ackData },
+                                { "version", 1 }
+                            };
+                            string ackJson = JsonSerializer.Serialize(ack);
+                            byte[] ackBytes = Encoding.UTF8.GetBytes(ackJson);
+                            await udpClient.SendAsync(ackBytes, ackBytes.Length, result.RemoteEndPoint);
+                            Console.WriteLine($"Sent ACK to {result.RemoteEndPoint}");
+                        }
                     }
                 }
                 catch (OperationCanceledException) { }
@@ -152,36 +164,63 @@ namespace RVNetworkLibrary.Services
                         try
                         {
                             var message = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
-                            if (message.TryGetValue("type", out object typeObj) && typeObj is string type)
+                            if (message.TryGetValue("type", out object typeObj) && typeObj is string type &&
+                                message.TryGetValue("data", out object dataObj) && dataObj is JsonElement dataElem)
                             {
+                                var data = JsonSerializer.Deserialize<Dictionary<string, object>>(dataElem.GetRawText());
                                 Console.WriteLine($"Received {type} from {remoteIp}: {json}");
                                 MessageReceived?.Invoke(type, message);
 
                                 switch (type)
                                 {
-                                    case "device_info":
-                                        if (message.TryGetValue("target_id", out object idObj) && idObj is string id)
+                                    case "config":
+                                        var action = data.TryGetValue("action", out object actionObj) ? actionObj.ToString() : null;
+                                        if (action == "device_info" && message.TryGetValue("target_id", out object idObj) && idObj is string id &&
+                                            data.TryGetValue("devices", out object devicesObj) && devicesObj is JsonElement devicesElem)  // Changed to "devices"
                                         {
                                             targetId = id;
                                             _connectedClients[id] = client; // Store client for sending commands
-                                            _devices[id] = new DeviceState { Relays = message["relays"], LastHeartbeat = DateTime.Now };
+                                            var devicesList = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(devicesElem.GetRawText());
+                                            // Initialize states if not present; filter/process only relays for now
+                                            foreach (var device in devicesList)
+                                            {
+                                                if (device.TryGetValue("device_type", out object devType) && devType.ToString() == "relay")
+                                                {
+                                                    if (!device.ContainsKey("state"))
+                                                    {
+                                                        device["state"] = device.TryGetValue("initial_state", out object initState) ? initState : "off";
+                                                    }
+                                                }
+                                                // Future: handle other types
+                                            }
+                                            _devices[id] = new DeviceState { Devices = devicesList, LastHeartbeat = DateTime.Now };  // Changed to Devices
                                         }
                                         break;
-                                    case "heartbeat":
-                                        if (targetId != null)
+                                    case "status":
+                                        var statusAction = data.TryGetValue("action", out object statusActionObj) ? statusActionObj.ToString() : null;
+                                        if (statusAction == "heartbeat" && targetId != null)
                                         {
                                             _devices[targetId].LastHeartbeat = DateTime.Now;
                                         }
-                                        break;
-                                    case "status_update":
-                                        // Update relay state in _devices
-                                        if (targetId != null && message.TryGetValue("label", out object labelObj) && labelObj is string label &&
-                                            message.TryGetValue("state", out object stateObj) && stateObj is string state)
+                                        else if (targetId != null && data.TryGetValue("devices", out object devicesStatusObj) && devicesStatusObj is JsonElement devicesStatusElem)  // Changed to "devices"
                                         {
-                                            // Assuming Relays is a Dictionary<string, string> for states; adjust as needed
-                                            if (_devices[targetId].Relays is Dictionary<string, string> relays)
+                                            var devicesStatus = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(devicesStatusElem.GetRawText());
+                                            if (_devices[targetId].Devices is List<Dictionary<string, object>> deviceList)
                                             {
-                                                relays[label] = state;
+                                                foreach (var devStatus in devicesStatus)
+                                                {
+                                                    if (devStatus.TryGetValue("device_type", out object devTypeObj) && devTypeObj.ToString() == "relay" &&
+                                                        devStatus.TryGetValue("label", out object labelObj) && labelObj is string label &&
+                                                        devStatus.TryGetValue("state", out object stateObj))
+                                                    {
+                                                        var matchingDevice = deviceList.FirstOrDefault(d => d["label"].ToString() == label);
+                                                        if (matchingDevice != null)
+                                                        {
+                                                            matchingDevice["state"] = stateObj;
+                                                        }
+                                                    }
+                                                    // Future: handle other device_types
+                                                }
                                             }
                                         }
                                         break;
@@ -247,7 +286,7 @@ namespace RVNetworkLibrary.Services
             }
         }
 
-        public async Task SendCommandAsync(string targetId, string label, string state)
+        public async Task SendCommandAsync(string targetId, string deviceType, string label, string state)  // Added deviceType param
         {
             if (_connectedClients.TryGetValue(targetId, out TcpClient client) && client.Connected)
             {
@@ -256,15 +295,23 @@ namespace RVNetworkLibrary.Services
                     using NetworkStream stream = client.GetStream();
                     using StreamWriter writer = new(stream) { AutoFlush = true };
 
-                    var command = new Dictionary<string, string>
+                    var commandData = new Dictionary<string, string>
                     {
-                        { "type", "command" },
+                        { "device_type", deviceType },  // Added
                         { "label", label },
                         { "state", state }
                     };
+                    var command = new Dictionary<string, object>
+                    {
+                        { "type", "command" },
+                        { "target_id", targetId },
+                        { "timestamp", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss") },
+                        { "data", commandData },
+                        { "version", 1 }
+                    };
                     string json = JsonSerializer.Serialize(command);
                     await writer.WriteLineAsync(json);
-                    Console.WriteLine($"Sent command: {label} to {state} for {targetId}");
+                    Console.WriteLine($"Sent command: {deviceType} {label} to {state} for {targetId}");
                 }
                 catch (Exception ex)
                 {
@@ -320,7 +367,7 @@ namespace RVNetworkLibrary.Services
 
     public class DeviceState
     {
-        public object Relays { get; set; }
+        public List<Dictionary<string, object>> Devices { get; set; }  // Changed from Relays to Devices
         public DateTime LastHeartbeat { get; set; }
     }
 }
