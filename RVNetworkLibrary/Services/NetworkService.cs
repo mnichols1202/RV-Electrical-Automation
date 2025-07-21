@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -18,10 +19,10 @@ namespace RVNetworkLibrary.Services
         private CancellationTokenSource _cts = new();
         private TcpListener _tcpListener;
         private ConcurrentDictionary<string, DeviceState> _devices = new();
-        private ConcurrentDictionary<string, TcpClient> _connectedClients = new(); // Track clients by target_id
+        private ConcurrentDictionary<string, TcpClient> _connectedClients = new();
 
         public event Action<string, object> MessageReceived;
-        public event Action<string> DeviceDisconnected; // New event for disconnect notifications
+        public event Action<string> DeviceDisconnected;
 
         public NetworkService(int udpPort = 5000, int tcpPort = 5001)
         {
@@ -61,34 +62,23 @@ namespace RVNetworkLibrary.Services
                     string json = Encoding.UTF8.GetString(result.Buffer);
                     var message = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
 
-                    if (message.TryGetValue("type", out object typeObj) && typeObj.ToString() == "config" &&
-                        message.TryGetValue("data", out object dataObj) && dataObj is JsonElement dataElem)
+                    if (message.TryGetValue("t", out object typeObj) && typeObj.ToString() == "c")
                     {
-                        var data = JsonSerializer.Deserialize<Dictionary<string, object>>(dataElem.GetRawText());
-                        if (data.TryGetValue("action", out object actionObj) && actionObj.ToString() == "announce")
-                        {
-                            string targetId = message["target_id"].ToString();
-                            string picoIp = data["ip"].ToString();
-                            Console.WriteLine($"Announce from {targetId} at {picoIp}");
+                        string targetId = message["i"].ToString();
+                        string picoIp = message["ip"].ToString();
+                        Console.WriteLine($"Announce from {targetId} at {picoIp}");
 
-                            var ackData = new Dictionary<string, object>
-                            {
-                                { "action", "ack" },
-                                { "server_ip", _localIp },
-                                { "tcp_port", _tcpPort }
-                            };
-                            var ack = new Dictionary<string, object>
-                            {
-                                { "type", "config" },
-                                { "timestamp", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss") },
-                                { "data", ackData },
-                                { "version", 1 }
-                            };
-                            string ackJson = JsonSerializer.Serialize(ack);
-                            byte[] ackBytes = Encoding.UTF8.GetBytes(ackJson);
-                            await udpClient.SendAsync(ackBytes, ackBytes.Length, result.RemoteEndPoint);
-                            Console.WriteLine($"Sent ACK to {result.RemoteEndPoint}");
-                        }
+                        var ack = new Dictionary<string, object>
+                        {
+                            { "t", "c" },
+                            { "i", targetId },
+                            { "server_ip", _localIp },
+                            { "tcp_port", _tcpPort }
+                        };
+                        string ackJson = JsonSerializer.Serialize(ack);
+                        byte[] ackBytes = Encoding.UTF8.GetBytes(ackJson);
+                        await udpClient.SendAsync(ackBytes, ackBytes.Length, result.RemoteEndPoint);
+                        Console.WriteLine($"Sent ACK to {result.RemoteEndPoint}");
                     }
                 }
                 catch (OperationCanceledException) { }
@@ -110,8 +100,8 @@ namespace RVNetworkLibrary.Services
                 try
                 {
                     TcpClient client = await _tcpListener.AcceptTcpClientAsync(_cts.Token);
-                    EnableTcpKeepAlives(client); // Enable keepalives for faster disconnect detection
-                    _ = HandleTcpClientAsync(client); // Fire and forget
+                    EnableTcpKeepAlives(client);
+                    _ = HandleTcpClientAsync(client);
                 }
                 catch (OperationCanceledException) { }
                 catch (Exception ex)
@@ -129,17 +119,15 @@ namespace RVNetworkLibrary.Services
             Console.WriteLine($"TCP client connected from {remoteIp}");
 
             using NetworkStream stream = client.GetStream();
-
             byte[] buffer = new byte[1024];
             StringBuilder messageBuilder = new StringBuilder();
-
-            string targetId = null; // To be set from device_info
+            string targetId = null;
 
             try
             {
                 while (client.Connected && !_cts.Token.IsCancellationRequested)
                 {
-                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token).ConfigureAwait(false);
+                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token);
                     if (bytesRead == 0)
                     {
                         Console.WriteLine($"TCP client from {remoteIp} disconnected (end of stream)");
@@ -147,94 +135,78 @@ namespace RVNetworkLibrary.Services
                     }
 
                     string receivedData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    //Console.WriteLine($"Raw data received from {remoteIp}: {receivedData}");
-
                     messageBuilder.Append(receivedData);
 
                     string messages = messageBuilder.ToString();
                     int nlIndex;
                     while ((nlIndex = messages.IndexOf('\n')) != -1)
                     {
-                        string json = messages.Substring(0, nlIndex);
+                        string line = messages.Substring(0, nlIndex);
                         messages = messages.Substring(nlIndex + 1);
                         messageBuilder = new StringBuilder(messages);
 
-                        Console.WriteLine($"{DateTime.Now} - Processing JSON from {remoteIp}: {json}");
+                        Console.WriteLine($"{DateTime.Now} - Processing from {remoteIp}: {line}");
 
                         try
                         {
-                            var message = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
-                            if (message.TryGetValue("type", out object typeObj) && typeObj is string type &&
-                                message.TryGetValue("data", out object dataObj) && dataObj is JsonElement dataElem)
+                            if (line.StartsWith("{")) // JSON config
                             {
-                                var data = JsonSerializer.Deserialize<Dictionary<string, object>>(dataElem.GetRawText());
-                                Console.WriteLine($"Received {type} from {remoteIp}: {json}");
-                                MessageReceived?.Invoke(type, message);
-
-                                switch (type)
+                                var message = JsonSerializer.Deserialize<Dictionary<string, object>>(line);
+                                if (message["t"].ToString() == "c" && message.TryGetValue("d", out object devicesObj) && devicesObj is JsonElement devicesElem)
                                 {
-                                    case "config":
-                                        var action = data.TryGetValue("action", out object actionObj) ? actionObj.ToString() : null;
-                                        if (action == "device_info" && message.TryGetValue("target_id", out object idObj) && idObj is string id &&
-                                            data.TryGetValue("devices", out object devicesObj) && devicesObj is JsonElement devicesElem)  // Changed to "devices"
+                                    targetId = message["i"].ToString();
+                                    _connectedClients[targetId] = client;
+                                    var devicesList = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(devicesElem.GetRawText());
+                                    var idToDeviceMap = new ConcurrentDictionary<string, Dictionary<string, object>>();
+                                    foreach (var device in devicesList)
+                                    {
+                                        string devId = device["id"].ToString();
+                                        idToDeviceMap[devId] = device;
+                                        if (device.TryGetValue("t", out object devType) && devType.ToString() == "r")
                                         {
-                                            targetId = id;
-                                            _connectedClients[id] = client; // Store client for sending commands
-                                            var devicesList = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(devicesElem.GetRawText());
-                                            // Initialize states if not present; filter/process only relays for now
-                                            foreach (var device in devicesList)
+                                            if (!device.ContainsKey("v"))
                                             {
-                                                if (device.TryGetValue("device_type", out object devType) && devType.ToString() == "relay")
-                                                {
-                                                    if (!device.ContainsKey("state"))
-                                                    {
-                                                        device["state"] = device.TryGetValue("initial_state", out object initState) ? initState : "off";
-                                                    }
-                                                }
-                                                // Future: handle other types
-                                            }
-                                            _devices[id] = new DeviceState { Devices = devicesList, LastHeartbeat = DateTime.Now };  // Changed to Devices
-                                        }
-                                        break;
-                                    case "status":
-                                        var statusAction = data.TryGetValue("action", out object statusActionObj) ? statusActionObj.ToString() : null;
-                                        if (statusAction == "heartbeat" && targetId != null)
-                                        {
-                                            _devices[targetId].LastHeartbeat = DateTime.Now;
-                                        }
-                                        else if (targetId != null && data.TryGetValue("devices", out object devicesStatusObj) && devicesStatusObj is JsonElement devicesStatusElem)  // Changed to "devices"
-                                        {
-                                            var devicesStatus = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(devicesStatusElem.GetRawText());
-                                            if (_devices[targetId].Devices is List<Dictionary<string, object>> deviceList)
-                                            {
-                                                foreach (var devStatus in devicesStatus)
-                                                {
-                                                    if (devStatus.TryGetValue("device_type", out object devTypeObj) && devTypeObj.ToString() == "relay" &&
-                                                        devStatus.TryGetValue("label", out object labelObj) && labelObj is string label &&
-                                                        devStatus.TryGetValue("state", out object stateObj))
-                                                    {
-                                                        var matchingDevice = deviceList.FirstOrDefault(d => d["label"].ToString() == label);
-                                                        if (matchingDevice != null)
-                                                        {
-                                                            matchingDevice["state"] = stateObj;
-                                                        }
-                                                    }
-                                                    // Future: handle other device_types
-                                                }
+                                                device["v"] = device.TryGetValue("initial_state", out object initState) ? initState : "off";
                                             }
                                         }
-                                        break;
+                                    }
+                                    _devices[targetId] = new DeviceState { Devices = devicesList, DeviceMap = idToDeviceMap, LastHeartbeat = DateTime.Now };
+                                    MessageReceived?.Invoke("config", message);
+                                }
+                            }
+                            else // CSV message
+                            {
+                                var parts = line.Split(',');
+                                if (parts.Length >= 4)
+                                {
+                                    targetId = parts[1];
+                                    string msgType = parts[3];
+                                    MessageReceived?.Invoke(msgType, parts);
+                                    if (msgType == "heartbeat" && _devices.ContainsKey(targetId))
+                                    {
+                                        _devices[targetId].LastHeartbeat = DateTime.Now;
+                                    }
+                                    else if (msgType == "status" && parts.Length == 5 && _devices.ContainsKey(targetId))
+                                    {
+                                        string deviceId = parts[2];
+                                        string state = parts[4];
+                                        var deviceMap = _devices[targetId].DeviceMap;
+                                        if (deviceMap.TryGetValue(deviceId, out var device))
+                                        {
+                                            device["v"] = state;
+                                        }
+                                    }
                                 }
                             }
                         }
-                        catch (JsonException ex)
+                        catch (Exception ex)
                         {
-                            Console.WriteLine($"JSON parse error: {ex.Message}");
+                            Console.WriteLine($"Parse error: {ex.Message}");
                         }
                     }
                 }
             }
-            catch (IOException ex) // Specific for socket errors
+            catch (IOException ex)
             {
                 Console.WriteLine($"TCP client from {remoteIp} disconnected due to IO error: {ex.Message}");
             }
@@ -266,11 +238,11 @@ namespace RVNetworkLibrary.Services
             {
                 try
                 {
-                    await Task.Delay(10000, _cts.Token); // Check every 10s
+                    await Task.Delay(10000, _cts.Token);
                     var now = DateTime.Now;
                     foreach (var kvp in _devices.ToArray())
                     {
-                        if (now - kvp.Value.LastHeartbeat > TimeSpan.FromSeconds(60)) // Timeout after 60s (2x heartbeat interval)
+                        if (now - kvp.Value.LastHeartbeat > TimeSpan.FromSeconds(60))
                         {
                             Console.WriteLine($"Device {kvp.Key} disconnected due to heartbeat timeout");
                             if (_connectedClients.TryRemove(kvp.Key, out var client))
@@ -286,7 +258,7 @@ namespace RVNetworkLibrary.Services
             }
         }
 
-        public async Task SendCommandAsync(string targetId, string deviceType, string label, string state)  // Added deviceType param
+        public async Task SendCommandAsync(string targetId, string deviceType, string label, string state)
         {
             if (_connectedClients.TryGetValue(targetId, out TcpClient client) && client.Connected)
             {
@@ -294,24 +266,21 @@ namespace RVNetworkLibrary.Services
                 {
                     using NetworkStream stream = client.GetStream();
                     using StreamWriter writer = new(stream) { AutoFlush = true };
-
-                    var commandData = new Dictionary<string, string>
+                    string deviceId = null;
+                    if (_devices.TryGetValue(targetId, out DeviceState deviceState))
                     {
-                        { "device_type", deviceType },  // Added
-                        { "label", label },
-                        { "state", state }
-                    };
-                    var command = new Dictionary<string, object>
+                        var device = deviceState.Devices.FirstOrDefault(d => d.TryGetValue("l", out var l) && l.ToString() == label);
+                        deviceId = device?.TryGetValue("id", out var id) == true ? id.ToString() : null;
+                    }
+                    if (deviceId == null)
                     {
-                        { "type", "command" },
-                        { "target_id", targetId },
-                        { "timestamp", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss") },
-                        { "data", commandData },
-                        { "version", 1 }
-                    };
-                    string json = JsonSerializer.Serialize(command);
-                    await writer.WriteLineAsync(json);
-                    Console.WriteLine($"Sent command: {deviceType} {label} to {state} for {targetId}");
+                        Console.WriteLine($"No device ID found for label {label} in {targetId}");
+                        return;
+                    }
+                    string ts = DateTime.UtcNow.ToString("yyMMddHHmmss");
+                    string csv = $"{ts},{targetId},{deviceId},update,{state}";
+                    await writer.WriteLineAsync(csv);
+                    Console.WriteLine($"Sent command: {deviceType} {label} (id: {deviceId}) to {state} for {targetId}");
                 }
                 catch (Exception ex)
                 {
@@ -328,15 +297,11 @@ namespace RVNetworkLibrary.Services
         {
             try
             {
-                // Enable keepalive
                 client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-
-                // Custom keepalive settings (Windows/Linux compatible via IOControl)
-                // Bytes: on (4 bytes), time (4 bytes, ms), interval (4 bytes, ms)
                 byte[] keepAliveValues = new byte[12];
-                BitConverter.GetBytes(1).CopyTo(keepAliveValues, 0); // Enable
-                BitConverter.GetBytes(30000).CopyTo(keepAliveValues, 4); // Idle time before probe (30s)
-                BitConverter.GetBytes(10000).CopyTo(keepAliveValues, 8); // Probe interval (10s)
+                BitConverter.GetBytes(1).CopyTo(keepAliveValues, 0);
+                BitConverter.GetBytes(30000).CopyTo(keepAliveValues, 4);
+                BitConverter.GetBytes(10000).CopyTo(keepAliveValues, 8);
                 client.Client.IOControl(IOControlCode.KeepAliveValues, keepAliveValues, null);
             }
             catch (Exception ex)
@@ -361,13 +326,24 @@ namespace RVNetworkLibrary.Services
                     }
                 }
             }
-            return "127.0.0.1"; // Fallback if no valid interface is found
+            return "127.0.0.1";
+        }
+
+        public Dictionary<string, List<Dictionary<string, object>>> GetDevices()
+        {
+            var result = new Dictionary<string, List<Dictionary<string, object>>>();
+            foreach (var device in _devices)
+            {
+                result[device.Key] = device.Value.Devices;
+            }
+            return result;
         }
     }
 
     public class DeviceState
     {
-        public List<Dictionary<string, object>> Devices { get; set; }  // Changed from Relays to Devices
+        public List<Dictionary<string, object>> Devices { get; set; }
+        public ConcurrentDictionary<string, Dictionary<string, object>> DeviceMap { get; set; } = new();
         public DateTime LastHeartbeat { get; set; }
     }
 }

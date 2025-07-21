@@ -2,37 +2,37 @@
   "config": {
     "wifi_ssid": "MM0001",
     "wifi_password": "J0shua07",
-    "target_id": "PicoW1",
+    "target_id": "Pico1",
     "UdpPort": 5000,
     "TcpPort": 5001,
     "ntpserver": "pool.ntp.org",
-    "timezone": -7 
+    "timezone": -7
   },
   "devices": [
     {
       "device_type": "relay",
-      "id": "relay1",
+      "id": "R1",
       "label": "Water Heater",
       "relay_pin": 6,
       "button_pin": 0
     },
     {
       "device_type": "relay",
-      "id": "relay2",
+      "id": "R2",
       "label": "Water Pump",
       "relay_pin": 7,
       "button_pin": 1
     },
     {
       "device_type": "relay",
-      "id": "relay3",
+      "id": "R3",
       "label": "Exterior Lights",
       "relay_pin": 8,
       "button_pin": 2
     },
     {
       "device_type": "relay",
-      "id": "relay4",
+      "id": "R4",
       "label": "Interior Lights",
       "relay_pin": 9,
       "button_pin": 3

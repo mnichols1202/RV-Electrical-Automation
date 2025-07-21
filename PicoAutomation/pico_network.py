@@ -17,8 +17,8 @@ class NetworkManager:
         self.target_id = setup_config['target_id']
         self.udp_port = setup_config['UdpPort']
         self.tcp_port = setup_config['TcpPort']
-        self.ntpserver = setup_config.get('ntpserver', 'pool.ntp.org')  // Default if not set
-        self.timezone_offset = setup_config.get('timezone', 0) * 3600  // Convert hours to seconds
+        self.ntpserver = setup_config.get('ntpserver', 'pool.ntp.org')  # Default if not set
+        self.timezone_offset = setup_config.get('timezone', 0) * 3600  # Convert hours to seconds
         self.devices = network_config['devices']  # Remains top-level
         self.led = Pin("LED", Pin.OUT)
         self.server_ip = None
@@ -31,18 +31,20 @@ class NetworkManager:
         self.start_time = time.time()  # For uptime in heartbeats
         print("Initialized NetworkManager")
 
-    def create_message(self, msg_type, data):
+    def create_message(self, msg_type, action, devices=None, extra=None):
         # Get UTC time, add timezone offset, then format
         adjusted_time = time.time() + self.timezone_offset
         lt = time.localtime(adjusted_time)  # (year, month, mday, hour, minute, second, weekday, yearday)
-        timestamp = f"{lt[0]:04d}-{lt[1]:02d}-{lt[2]:02d}T{lt[3]:02d}:{lt[4]:02d}:{lt[5]:02d}"
-        return {
-            "type": msg_type,
-            "target_id": self.target_id,
-            "timestamp": timestamp,
-            "data": data,
-            "version": 1
-        }
+        ts = f"{lt[0]:04d}-{lt[1]:02d}-{lt[2]:02d}T{lt[3]:02d}:{lt[4]:02d}:{lt[5]:02d}"
+        data = {"action": action}
+        if devices:
+            data["devices"] = devices
+        if extra:
+            data.update(extra)
+        msg = {"type": msg_type, "id": self.target_id, "ts": ts, "data": data}
+        msg_str = json.dumps(msg)
+        msg["chk"] = sum(msg_str.encode()) % 256
+        return msg
 
     def failure_blink(self, duration=10, blink_interval=0.1):
         start_time = time.time()
@@ -159,7 +161,8 @@ class NetworkManager:
                     return False
         
         try:
-            message = json.dumps(self.create_message("config", {"action": "announce", "ip": ip})).encode()
+            message = self.create_message("config", "announce", extra={"ip": ip})
+            message_json = json.dumps(message).encode()
             
             for attempt in range(1, max_attempts + 1):
                 self.led.value(1)
@@ -168,7 +171,7 @@ class NetworkManager:
                 time.sleep(0.1)
                 
                 print(f"UDP announce attempt {attempt}/{max_attempts} to {broadcast_ip}:{self.udp_port}")
-                sock.sendto(message, (broadcast_ip, self.udp_port))
+                sock.sendto(message_json, (broadcast_ip, self.udp_port))
                 
                 sock.settimeout(timeout)
                 try:
@@ -203,7 +206,7 @@ class NetworkManager:
             self.led.value(1)  # Solid LED on connected
 
             # Send device_info with "devices" array
-            device_info = self.create_message("config", {"action": "device_info", "devices": self.devices})
+            device_info = self.create_message("config", "device_info", devices=self.devices)
             self.tcp_sock.sendall(json.dumps(device_info).encode() + b'\n')
             return True
         except OSError as e:
@@ -222,8 +225,7 @@ class NetworkManager:
         while self.connected:
             # Send heartbeat
             if time.time() - last_heartbeat > heartbeat_interval:
-                heartbeat_data = {"action": "heartbeat", "uptime": int(time.time() - self.start_time)}
-                heartbeat = self.create_message("status", heartbeat_data)
+                heartbeat = self.create_message("status", "heartbeat", extra={"uptime": int(time.time() - self.start_time)})
                 try:
                     self.tcp_sock.sendall(json.dumps(heartbeat).encode() + b'\n')
                     print("Sent heartbeat")
@@ -237,8 +239,10 @@ class NetworkManager:
                 if self.message_queue:
                     msg = self.message_queue.pop(0)
                     if msg.get("type") == "status":
-                        # Wrap with common fields; expect msg["data"]["devices"] for extensibility
-                        std_msg = self.create_message("status", msg["data"])
+                        # Wrap with common fields; expect msg["data"]["devices"] for extensibility, set action if missing
+                        if "action" not in msg["data"]:
+                            msg["data"]["action"] = "update"
+                        std_msg = self.create_message("status", msg["data"]["action"], msg["data"].get("devices"), {k: v for k, v in msg["data"].items() if k not in ["action", "devices"]})
                         try:
                             self.tcp_sock.sendall(json.dumps(std_msg).encode() + b'\n')
                             print(f"Sent standardized status: {std_msg}")
@@ -273,17 +277,22 @@ class NetworkManager:
                     try:
                         msg = json.loads(line.decode())
                         print(f"Received message: {msg}")
-                        if msg.get("type") == "command":
-                            data = msg.get("data", {})
-                            device_type = data.get("device_type")
-                            if device_type == "relay":  # Check for relay; extensible for others
-                                label = data.get("label")
-                                state = data.get("state")
-                                if self.relay_toggle:
-                                    self.relay_toggle.toggle_relay(label, state)  # Use instance method
-                                else:
-                                    print("RelayToggle instance not set")
-                            # Future: elif device_type == "stepper": etc.
+                        # Validate checksum
+                        msg_no_chk = {k: v for k, v in msg.items() if k != "chk"}
+                        calc_chk = sum(json.dumps(msg_no_chk).encode()) % 256
+                        if msg.get("chk") != calc_chk:
+                            print(f"Checksum mismatch: {msg.get('chk')} vs {calc_chk}")
+                            continue
+                        if msg.get("type") == "command" and msg["data"].get("action") == "toggle":
+                            for dev in msg["data"].get("devices", []):
+                                if dev.get("type") == "relay":  # Check for relay; extensible for others
+                                    label = dev.get("label")
+                                    value = dev.get("value")  # Generalized from "state"
+                                    if self.relay_toggle:
+                                        self.relay_toggle.toggle_relay(label, value)  # Use instance method
+                                    else:
+                                        print("RelayToggle instance not set")
+                                # Future: elif dev["type"] == "stepper": etc.
                     except json.JSONDecodeError:
                         print("Invalid JSON received")
             except OSError as e:
