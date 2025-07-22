@@ -18,7 +18,6 @@ namespace RVNetworkLibrary.Services
         private readonly string _localIp;
         private CancellationTokenSource _cts = new();
         private TcpListener _tcpListener;
-        private ConcurrentDictionary<string, DeviceState> _devices = new();
         private ConcurrentDictionary<string, TcpClient> _connectedClients = new();
 
         public event Action<string, object> MessageReceived;
@@ -46,7 +45,6 @@ namespace RVNetworkLibrary.Services
                 client.Close();
             }
             _connectedClients.Clear();
-            _devices.Clear();
         }
 
         private async Task StartUdpListenerAsync()
@@ -146,63 +144,6 @@ namespace RVNetworkLibrary.Services
                         messageBuilder = new StringBuilder(messages);
 
                         Console.WriteLine($"{DateTime.Now} - Processing from {remoteIp}: {line}");
-
-                        try
-                        {
-                            if (line.StartsWith("{")) // JSON config
-                            {
-                                var message = JsonSerializer.Deserialize<Dictionary<string, object>>(line);
-                                if (message["t"].ToString() == "c" && message.TryGetValue("d", out object devicesObj) && devicesObj is JsonElement devicesElem)
-                                {
-                                    targetId = message["i"].ToString();
-                                    _connectedClients[targetId] = client;
-                                    var devicesList = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(devicesElem.GetRawText());
-                                    var idToDeviceMap = new ConcurrentDictionary<string, Dictionary<string, object>>();
-                                    foreach (var device in devicesList)
-                                    {
-                                        string devId = device["id"].ToString();
-                                        idToDeviceMap[devId] = device;
-                                        if (device.TryGetValue("t", out object devType) && devType.ToString() == "r")
-                                        {
-                                            if (!device.ContainsKey("v"))
-                                            {
-                                                device["v"] = device.TryGetValue("initial_state", out object initState) ? initState : "off";
-                                            }
-                                        }
-                                    }
-                                    _devices[targetId] = new DeviceState { Devices = devicesList, DeviceMap = idToDeviceMap, LastHeartbeat = DateTime.Now };
-                                    MessageReceived?.Invoke("config", message);
-                                }
-                            }
-                            else // CSV message
-                            {
-                                var parts = line.Split(',');
-                                if (parts.Length >= 4)
-                                {
-                                    targetId = parts[1];
-                                    string msgType = parts[3];
-                                    MessageReceived?.Invoke(msgType, parts);
-                                    if (msgType == "heartbeat" && _devices.ContainsKey(targetId))
-                                    {
-                                        _devices[targetId].LastHeartbeat = DateTime.Now;
-                                    }
-                                    else if (msgType == "status" && parts.Length == 5 && _devices.ContainsKey(targetId))
-                                    {
-                                        string deviceId = parts[2];
-                                        string state = parts[4];
-                                        var deviceMap = _devices[targetId].DeviceMap;
-                                        if (deviceMap.TryGetValue(deviceId, out var device))
-                                        {
-                                            device["v"] = state;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Parse error: {ex.Message}");
-                        }
                     }
                 }
             }
@@ -225,7 +166,6 @@ namespace RVNetworkLibrary.Services
                 if (targetId != null)
                 {
                     _connectedClients.TryRemove(targetId, out _);
-                    _devices.TryRemove(targetId, out _);
                     DeviceDisconnected?.Invoke(targetId);
                 }
                 Console.WriteLine($"TCP client disconnected from {remoteIp}");
@@ -240,19 +180,6 @@ namespace RVNetworkLibrary.Services
                 {
                     await Task.Delay(10000, _cts.Token);
                     var now = DateTime.Now;
-                    foreach (var kvp in _devices.ToArray())
-                    {
-                        if (now - kvp.Value.LastHeartbeat > TimeSpan.FromSeconds(60))
-                        {
-                            Console.WriteLine($"Device {kvp.Key} disconnected due to heartbeat timeout");
-                            if (_connectedClients.TryRemove(kvp.Key, out var client))
-                            {
-                                client.Close();
-                            }
-                            _devices.TryRemove(kvp.Key, out _);
-                            DeviceDisconnected?.Invoke(kvp.Key);
-                        }
-                    }
                 }
                 catch (OperationCanceledException) { }
             }
@@ -260,37 +187,6 @@ namespace RVNetworkLibrary.Services
 
         public async Task SendCommandAsync(string targetId, string deviceType, string label, string state)
         {
-            if (_connectedClients.TryGetValue(targetId, out TcpClient client) && client.Connected)
-            {
-                try
-                {
-                    using NetworkStream stream = client.GetStream();
-                    using StreamWriter writer = new(stream) { AutoFlush = true };
-                    string deviceId = null;
-                    if (_devices.TryGetValue(targetId, out DeviceState deviceState))
-                    {
-                        var device = deviceState.Devices.FirstOrDefault(d => d.TryGetValue("l", out var l) && l.ToString() == label);
-                        deviceId = device?.TryGetValue("id", out var id) == true ? id.ToString() : null;
-                    }
-                    if (deviceId == null)
-                    {
-                        Console.WriteLine($"No device ID found for label {label} in {targetId}");
-                        return;
-                    }
-                    string ts = DateTime.UtcNow.ToString("yyMMddHHmmss");
-                    string csv = $"{ts},{targetId},{deviceId},update,{state}";
-                    await writer.WriteLineAsync(csv);
-                    Console.WriteLine($"Sent command: {deviceType} {label} (id: {deviceId}) to {state} for {targetId}");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Send command error: {ex.Message}");
-                }
-            }
-            else
-            {
-                Console.WriteLine($"No connected client for {targetId}");
-            }
         }
 
         private void EnableTcpKeepAlives(TcpClient client)
@@ -329,21 +225,5 @@ namespace RVNetworkLibrary.Services
             return "127.0.0.1";
         }
 
-        public Dictionary<string, List<Dictionary<string, object>>> GetDevices()
-        {
-            var result = new Dictionary<string, List<Dictionary<string, object>>>();
-            foreach (var device in _devices)
-            {
-                result[device.Key] = device.Value.Devices;
-            }
-            return result;
-        }
-    }
-
-    public class DeviceState
-    {
-        public List<Dictionary<string, object>> Devices { get; set; }
-        public ConcurrentDictionary<string, Dictionary<string, object>> DeviceMap { get; set; } = new();
-        public DateTime LastHeartbeat { get; set; }
     }
 }

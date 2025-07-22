@@ -2,40 +2,17 @@
   "config": {
     "wifi_ssid": "MM0001",
     "wifi_password": "J0shua07",
-    "target_id": "Pico1",
+    "target_id": "PicoW1",
     "UdpPort": 5000,
     "TcpPort": 5001,
     "ntpserver": "pool.ntp.org",
-    "timezone": -7
+    "timezone": -7,
+    "debug": true
   },
   "devices": [
-    {
-      "device_type": "relay",
-      "id": "R1",
-      "label": "Water Heater",
-      "relay_pin": 6,
-      "button_pin": 0
-    },
-    {
-      "device_type": "relay",
-      "id": "R2",
-      "label": "Water Pump",
-      "relay_pin": 7,
-      "button_pin": 1
-    },
-    {
-      "device_type": "relay",
-      "id": "R3",
-      "label": "Exterior Lights",
-      "relay_pin": 8,
-      "button_pin": 2
-    },
-    {
-      "device_type": "relay",
-      "id": "R4",
-      "label": "Interior Lights",
-      "relay_pin": 9,
-      "button_pin": 3
-    }
+    { "device_type": "relay", "id": "1", "label": "Water Heater", "relay_pin": 6, "button_pin": 0 },
+    { "device_type": "relay", "id": "2", "label": "Water Pump", "relay_pin": 7, "button_pin": 1 },
+    { "device_type": "relay", "id": "3", "label": "Exterior Lights", "relay_pin": 8, "button_pin": 2 },
+    { "device_type": "relay", "id": "4", "label": "Interior Lights", "relay_pin": 9, "button_pin": 3 }
   ]
 }
