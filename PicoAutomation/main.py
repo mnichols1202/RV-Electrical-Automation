@@ -15,7 +15,8 @@ def load_config(filename='config.json'):
             'UdpPort': 5000,
             'TcpPort': 5001,
             'ntpserver': 'pool.ntp.org',
-            'timezone': 0  # Default UTC
+            'timezone': 0, # Default UTC
+            'debug': False
         },
         'devices': []
     }

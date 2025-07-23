@@ -1,6 +1,5 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -17,8 +16,6 @@ namespace RVNetworkLibrary.Services
         private readonly int _tcpPort;
         private readonly string _localIp;
         private CancellationTokenSource _cts = new();
-        private TcpListener _tcpListener;
-        private ConcurrentDictionary<string, TcpClient> _connectedClients = new();
 
         public event Action<string, object> MessageReceived;
         public event Action<string> DeviceDisconnected;
@@ -33,176 +30,112 @@ namespace RVNetworkLibrary.Services
         public async Task StartAsync(CancellationToken cancellationToken = default)
         {
             _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            await Task.WhenAll(StartUdpListenerAsync(), StartTcpServerAsync(), HeartbeatMonitorAsync());
-        }
-
-        public void Stop()
-        {
-            _cts.Cancel();
-            _tcpListener?.Stop();
-            foreach (var client in _connectedClients.Values)
-            {
-                client.Close();
-            }
-            _connectedClients.Clear();
+            Console.WriteLine($"[StartAsync] CancellationToken linked. Launching UDP listener...");
+            var udpTask = StartUdpListenerAsync();
+            Console.WriteLine($"[StartAsync] Launching TCP server...");
+            var tcpTask = StartTcpServerAsync(_cts.Token);
+            await Task.WhenAll(udpTask, tcpTask);
         }
 
         private async Task StartUdpListenerAsync()
         {
-            using UdpClient udpClient = new(_udpPort);
-            Console.WriteLine($"UDP listener started on {_localIp}:{_udpPort}");
-
-            while (!_cts.Token.IsCancellationRequested)
+            Console.WriteLine($"[UDP] Listener starting on {_localIp}:{_udpPort}");
+            using (var udpClient = new UdpClient(_udpPort))
             {
                 try
                 {
-                    UdpReceiveResult result = await udpClient.ReceiveAsync(_cts.Token);
-                    string json = Encoding.UTF8.GetString(result.Buffer);
-                    var message = JsonSerializer.Deserialize<Dictionary<string, object>>(json);
-
-                    if (message.TryGetValue("t", out object typeObj) && typeObj.ToString() == "c")
+                    while (true)
                     {
-                        string targetId = message["i"].ToString();
-                        string picoIp = message["ip"].ToString();
-                        Console.WriteLine($"Announce from {targetId} at {picoIp}");
+                        Console.WriteLine($"[UDP] Awaiting packet...");
+                        UdpReceiveResult result = await udpClient.ReceiveAsync();
 
-                        var ack = new Dictionary<string, object>
+                        string message = Encoding.UTF8.GetString(result.Buffer);
+                        IPEndPoint remoteEP = result.RemoteEndPoint;
+                        Console.WriteLine($"[UDP] Received from {remoteEP.Address}:{remoteEP.Port} → {message}");
+
+                        try
                         {
-                            { "t", "c" },
-                            { "i", targetId },
-                            { "server_ip", _localIp },
-                            { "tcp_port", _tcpPort }
-                        };
-                        string ackJson = JsonSerializer.Serialize(ack);
-                        byte[] ackBytes = Encoding.UTF8.GetBytes(ackJson);
-                        await udpClient.SendAsync(ackBytes, ackBytes.Length, result.RemoteEndPoint);
-                        Console.WriteLine($"Sent ACK to {result.RemoteEndPoint}");
+                            Console.WriteLine($"[UDP] Parsing JSON...");
+                            using var doc = JsonDocument.Parse(message);
+                            var root = doc.RootElement;
+                            string action = root.GetProperty("action").GetString();
+                            Console.WriteLine($"[UDP] action = {action}");
+
+                            if (action == "announce" &&
+                                root.TryGetProperty("id", out JsonElement idProp))
+                            {
+                                string deviceId = idProp.GetString();
+                                Console.WriteLine($"[UDP] Announce from deviceId = {deviceId}");
+
+                                var ack = new
+                                {
+                                    action = "ack",
+                                    id = deviceId,
+                                    timestamp = DateTimeOffset.Now.ToString("yyyy-MM-ddTHH:mm:sszzz"),
+                                    data = new
+                                    {
+                                        server_ip = _localIp,
+                                        tcp_port = _tcpPort
+                                    }
+                                };
+
+                                byte[] ackBytes = JsonSerializer.SerializeToUtf8Bytes(ack);
+                                var senderEp = new IPEndPoint(remoteEP.Address, remoteEP.Port);
+                                Console.WriteLine($"[UDP] Sending ACK to {senderEp.Address}:{senderEp.Port}");
+                                await udpClient.SendAsync(ackBytes, ackBytes.Length, senderEp);
+                                Console.WriteLine($"[UDP] ACK sent successfully");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"[UDP] Ignored non‑announce or missing id");
+                            }
+                        }
+                        catch (JsonException je)
+                        {
+                            Console.WriteLine($"[UDP] JSON parse error: {je.Message}");
+                        }
                     }
                 }
-                catch (OperationCanceledException) { }
-                catch (Exception ex)
+                catch (SocketException ex)
                 {
-                    Console.WriteLine($"UDP error: {ex.Message}");
+                    Console.WriteLine($"[UDP] Socket error: {ex.Message}");
+                }
+                finally
+                {
+                    Console.WriteLine($"[UDP] Listener exiting and socket closing");
                 }
             }
         }
 
-        private async Task StartTcpServerAsync()
+        public async Task StartTcpServerAsync(CancellationToken cancellationToken = default)
         {
-            _tcpListener = new TcpListener(IPAddress.Any, _tcpPort);
-            _tcpListener.Start();
-            Console.WriteLine($"TCP server started on {_localIp}:{_tcpPort}");
+            var listener = new TcpListener(IPAddress.Any, _tcpPort);
+            listener.Start();
+            Console.WriteLine($"[TCP] Server listening on port {_tcpPort}");
 
-            while (!_cts.Token.IsCancellationRequested)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                try
-                {
-                    TcpClient client = await _tcpListener.AcceptTcpClientAsync(_cts.Token);
-                    EnableTcpKeepAlives(client);
-                    _ = HandleTcpClientAsync(client);
-                }
-                catch (OperationCanceledException) { }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"TCP accept error: {ex.Message}");
-                }
-            }
-
-            _tcpListener.Stop();
-        }
-
-        private async Task HandleTcpClientAsync(TcpClient client)
-        {
-            string remoteIp = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
-            Console.WriteLine($"TCP client connected from {remoteIp}");
-
-            using NetworkStream stream = client.GetStream();
-            byte[] buffer = new byte[1024];
-            StringBuilder messageBuilder = new StringBuilder();
-            string targetId = null;
-
-            try
-            {
-                while (client.Connected && !_cts.Token.IsCancellationRequested)
-                {
-                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, _cts.Token);
-                    if (bytesRead == 0)
-                    {
-                        Console.WriteLine($"TCP client from {remoteIp} disconnected (end of stream)");
-                        break;
-                    }
-
-                    string receivedData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    messageBuilder.Append(receivedData);
-
-                    string messages = messageBuilder.ToString();
-                    int nlIndex;
-                    while ((nlIndex = messages.IndexOf('\n')) != -1)
-                    {
-                        string line = messages.Substring(0, nlIndex);
-                        messages = messages.Substring(nlIndex + 1);
-                        messageBuilder = new StringBuilder(messages);
-
-                        Console.WriteLine($"{DateTime.Now} - Processing from {remoteIp}: {line}");
-                    }
-                }
-            }
-            catch (IOException ex)
-            {
-                Console.WriteLine($"TCP client from {remoteIp} disconnected due to IO error: {ex.Message}");
-            }
-            catch (ObjectDisposedException ex)
-            {
-                Console.WriteLine($"TCP client from {remoteIp} disconnected due to disposal: {ex.Message}");
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"TCP client error: {ex.Message}");
-            }
-            finally
-            {
-                client.Close();
-                if (targetId != null)
-                {
-                    _connectedClients.TryRemove(targetId, out _);
-                    DeviceDisconnected?.Invoke(targetId);
-                }
-                Console.WriteLine($"TCP client disconnected from {remoteIp}");
+                TcpClient client = await listener.AcceptTcpClientAsync(cancellationToken);
+                Console.WriteLine($"[TCP] Client connected: {client.Client.RemoteEndPoint}");
+                _ = HandleTcpClientAsync(client, cancellationToken); // Handle each client in background
             }
         }
 
-        private async Task HeartbeatMonitorAsync()
+        private async Task HandleTcpClientAsync(TcpClient client, CancellationToken cancellationToken)
         {
-            while (!_cts.Token.IsCancellationRequested)
+            using (client)
+            using (var stream = client.GetStream())
             {
-                try
+                var buffer = new byte[1024];
+                while (!cancellationToken.IsCancellationRequested)
                 {
-                    await Task.Delay(10000, _cts.Token);
-                    var now = DateTime.Now;
+                    int bytesRead = await stream.ReadAsync(buffer, cancellationToken);
+                    if (bytesRead == 0) break; // Client disconnected
+
+                    string received = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    Console.WriteLine($"[TCP] Received: {received}");
                 }
-                catch (OperationCanceledException) { }
-            }
-        }
-
-        public async Task SendCommandAsync(string targetId, string deviceType, string label, string state)
-        {
-        }
-
-        private void EnableTcpKeepAlives(TcpClient client)
-        {
-            try
-            {
-                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-                byte[] keepAliveValues = new byte[12];
-                BitConverter.GetBytes(1).CopyTo(keepAliveValues, 0);
-                BitConverter.GetBytes(30000).CopyTo(keepAliveValues, 4);
-                BitConverter.GetBytes(10000).CopyTo(keepAliveValues, 8);
-                client.Client.IOControl(IOControlCode.KeepAliveValues, keepAliveValues, null);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Failed to set TCP keepalives: {ex.Message}");
+                Console.WriteLine("[TCP] Client disconnected");
             }
         }
 
@@ -224,6 +157,5 @@ namespace RVNetworkLibrary.Services
             }
             return "127.0.0.1";
         }
-
     }
 }
