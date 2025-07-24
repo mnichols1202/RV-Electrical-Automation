@@ -7,8 +7,11 @@ namespace AutomationConsole
     {
         static async Task Main(string[] args)
         {
-            var service = new NetworkService();
-            await service.StartAsync();
+            var service = new NetworkService(5000);
+            
+            // keep the process alive forever
+            await Task.Delay(Timeout.Infinite);
+
         }
     }
 }

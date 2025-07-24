@@ -14,20 +14,21 @@ namespace AutomationWeb.Services
         public NetworkHostedService(NetworkService networkService)
         {
             _networkService = networkService ?? throw new ArgumentNullException(nameof(networkService));
-            _networkService.MessageReceived += OnMessageReceived;
+           // _networkService.MessageReceived += OnMessageReceived;
         }
 
         public Task StartAsync(CancellationToken cancellationToken)
         {
-            Console.WriteLine("Starting NetworkHostedService");
-            return _networkService.StartAsync(cancellationToken);
+            //    Console.WriteLine("Starting NetworkHostedService");
+            //    return _networkService.StartAsync(cancellationToken);
+            return null;
         }
 
         public Task StopAsync(CancellationToken cancellationToken)
         {
             Console.WriteLine("Stopping NetworkHostedService");
-            _networkService.MessageReceived -= OnMessageReceived;
-            _networkService.Stop();
+            //_networkService.MessageReceived -= OnMessageReceived;
+            //_networkService.Stop();
             return Task.CompletedTask;
         }
 

@@ -22,7 +22,7 @@
 
     protected override void OnInitialized()
     {
-        NetworkService.MessageReceived += OnMessageReceived;
+        //NetworkService.MessageReceived += OnMessageReceived;
     }
 
     private void OnMessageReceived(string type, object messageObj)
@@ -55,6 +55,6 @@
 
     public void Dispose()
     {
-        NetworkService.MessageReceived -= OnMessageReceived;
+        //NetworkService.MessageReceived -= OnMessageReceived;
     }
 }

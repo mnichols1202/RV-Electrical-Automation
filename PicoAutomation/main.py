@@ -1,8 +1,9 @@
-# main.py (integrated with relay_toggle and network)
+# main.py (integrated with relay_toggle, network, and hardware watchdog)
 import json
 import time
 import uasyncio
 import _thread  # For lock and threading network loop
+from machine import WDT  # Import hardware watchdog
 from relay_toggle import RelayToggle
 from pico_network import NetworkManager
 
@@ -46,6 +47,9 @@ config = load_config()
 message_queue = []  # Shared list for status_updates
 queue_lock = _thread.allocate_lock()  # Lock for thread-safety
 
+# Setup hardware watchdog (8 seconds timeout)
+# wdt = WDT(timeout=8000)
+
 # Setup network (with shared queue/lock); pass full config
 network_manager = NetworkManager(config, message_queue, queue_lock)
 
@@ -56,10 +60,10 @@ relay_toggle.setup()  # Sets up IRQs
 # Link relay_toggle instance to network_manager
 network_manager.relay_toggle = relay_toggle
 
-print("Run Network Loop")
-# Run network loop in a thread (non-blocking)
-_thread.start_new_thread(network_manager.run_network_loop, ())
+print("Run Network Loop (uasyncio)")
+uasyncio.run(network_manager.run_network_loop_async())
 
-# Keep main thread alive (no async loop needed since queuing is handled in network thread)
+# Keep main thread alive and feed the watchdog
 while True:
+#    wdt.feed()  # Feed the watchdog to prevent reset
     time.sleep(1)

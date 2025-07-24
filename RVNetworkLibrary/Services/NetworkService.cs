@@ -1,161 +1,204 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
-using System.Net.NetworkInformation;
-using System.Threading;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
 namespace RVNetworkLibrary.Services
 {
-    public class NetworkService
+    public class NetworkService : IDisposable
     {
-        private readonly int _udpPort;
+        private readonly int _listenPort;
+        private UdpClient _udpClient;
         private readonly int _tcpPort;
-        private readonly string _localIp;
-        private CancellationTokenSource _cts = new();
-
-        public event Action<string, object> MessageReceived;
-        public event Action<string> DeviceDisconnected;
+        private TcpListener _tcpListener;
+        private readonly ConcurrentDictionary<string, TcpClient> _connectedPicos = new();
 
         public NetworkService(int udpPort = 5000, int tcpPort = 5001)
         {
-            _udpPort = udpPort;
+            _listenPort = udpPort;
             _tcpPort = tcpPort;
-            _localIp = GetLocalIpAddress();
+            CreateClient();
+            Console.WriteLine($"{DateTime.UtcNow:o} [NetworkService] UDP server starting on port {_listenPort}");
+            Task.Run(() => MonitorLoopAsync());
+            Task.Run(() => StartTcpServerAsync());
         }
 
-        public async Task StartAsync(CancellationToken cancellationToken = default)
+        private void CreateClient()
         {
-            _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            Console.WriteLine($"[StartAsync] CancellationToken linked. Launching UDP listener...");
-            var udpTask = StartUdpListenerAsync();
-            Console.WriteLine($"[StartAsync] Launching TCP server...");
-            var tcpTask = StartTcpServerAsync(_cts.Token);
-            await Task.WhenAll(udpTask, tcpTask);
+            _udpClient = new UdpClient(_listenPort)
+            {
+                EnableBroadcast = true
+            };
         }
 
-        private async Task StartUdpListenerAsync()
+        private async Task MonitorLoopAsync()
         {
-            Console.WriteLine($"[UDP] Listener starting on {_localIp}:{_udpPort}");
-            using (var udpClient = new UdpClient(_udpPort))
+            while (true)
             {
                 try
                 {
-                    while (true)
-                    {
-                        Console.WriteLine($"[UDP] Awaiting packet...");
-                        UdpReceiveResult result = await udpClient.ReceiveAsync();
-
-                        string message = Encoding.UTF8.GetString(result.Buffer);
-                        IPEndPoint remoteEP = result.RemoteEndPoint;
-                        Console.WriteLine($"[UDP] Received from {remoteEP.Address}:{remoteEP.Port} → {message}");
-
-                        try
-                        {
-                            Console.WriteLine($"[UDP] Parsing JSON...");
-                            using var doc = JsonDocument.Parse(message);
-                            var root = doc.RootElement;
-                            string action = root.GetProperty("action").GetString();
-                            Console.WriteLine($"[UDP] action = {action}");
-
-                            if (action == "announce" &&
-                                root.TryGetProperty("id", out JsonElement idProp))
-                            {
-                                string deviceId = idProp.GetString();
-                                Console.WriteLine($"[UDP] Announce from deviceId = {deviceId}");
-
-                                var ack = new
-                                {
-                                    action = "ack",
-                                    id = deviceId,
-                                    timestamp = DateTimeOffset.Now.ToString("yyyy-MM-ddTHH:mm:sszzz"),
-                                    data = new
-                                    {
-                                        server_ip = _localIp,
-                                        tcp_port = _tcpPort
-                                    }
-                                };
-
-                                byte[] ackBytes = JsonSerializer.SerializeToUtf8Bytes(ack);
-                                var senderEp = new IPEndPoint(remoteEP.Address, remoteEP.Port);
-                                Console.WriteLine($"[UDP] Sending ACK to {senderEp.Address}:{senderEp.Port}");
-                                await udpClient.SendAsync(ackBytes, ackBytes.Length, senderEp);
-                                Console.WriteLine($"[UDP] ACK sent successfully");
-                            }
-                            else
-                            {
-                                Console.WriteLine($"[UDP] Ignored non‑announce or missing id");
-                            }
-                        }
-                        catch (JsonException je)
-                        {
-                            Console.WriteLine($"[UDP] JSON parse error: {je.Message}");
-                        }
-                    }
+                    Console.WriteLine($"{DateTime.UtcNow:o} [NetworkService] Listening for announces...");
+                    await ReceiveLoopAsync();
                 }
-                catch (SocketException ex)
+                catch (Exception ex)
                 {
-                    Console.WriteLine($"[UDP] Socket error: {ex.Message}");
+                    Console.WriteLine($"{DateTime.UtcNow:o} [NetworkService] Error: {ex.Message}. Restarting in 1s");
                 }
-                finally
-                {
-                    Console.WriteLine($"[UDP] Listener exiting and socket closing");
-                }
+
+                _udpClient.Close();
+                CreateClient();
+                await Task.Delay(1000);
             }
         }
 
-        public async Task StartTcpServerAsync(CancellationToken cancellationToken = default)
+        private async Task ReceiveLoopAsync()
         {
-            var listener = new TcpListener(IPAddress.Any, _tcpPort);
-            listener.Start();
+            while (true)
+            {
+                var result = await _udpClient.ReceiveAsync();
+                var remote = result.RemoteEndPoint;
+                var json = Encoding.UTF8.GetString(result.Buffer);
+
+                Console.WriteLine($"{DateTime.UtcNow:o} [NetworkService] Received from {remote}: {json}");
+
+                Announce announce;
+                try
+                {
+                    announce = JsonSerializer.Deserialize<Announce>(json);
+                }
+                catch (JsonException jex)
+                {
+                    Console.WriteLine($"{DateTime.UtcNow:o} [NetworkService] Invalid JSON: {jex.Message}");
+                    continue;
+                }
+
+                if (announce.Action != "announce")
+                {
+                    Console.WriteLine($"{DateTime.UtcNow:o} [NetworkService] Ignored action: {announce.Action}");
+                    continue;
+                }
+
+                var ack = new Ack
+                {
+                    Action = "ack",
+                    Id = announce.Id,
+                    Timestamp = DateTime.UtcNow.ToString("o"),
+                    ServerIp = GetLocalIPAddress(),
+                    ServerPort = _listenPort
+                };
+
+                var ackJson = JsonSerializer.Serialize(ack);
+                var ackBytes = Encoding.UTF8.GetBytes(ackJson);
+                await _udpClient.SendAsync(ackBytes, ackBytes.Length, remote);
+
+                Console.WriteLine($"{DateTime.UtcNow:o} [NetworkService] Sent to {remote}: {ackJson}");
+            }
+        }
+
+        private async Task StartTcpServerAsync()
+        {
+            _tcpListener = new TcpListener(IPAddress.Any, _tcpPort);
+            _tcpListener.Start();
             Console.WriteLine($"[TCP] Server listening on port {_tcpPort}");
 
-            while (!cancellationToken.IsCancellationRequested)
+            while (true)
             {
-                TcpClient client = await listener.AcceptTcpClientAsync(cancellationToken);
+                TcpClient client = await _tcpListener.AcceptTcpClientAsync();
                 Console.WriteLine($"[TCP] Client connected: {client.Client.RemoteEndPoint}");
-                _ = HandleTcpClientAsync(client, cancellationToken); // Handle each client in background
+                _ = HandleTcpClientAsync(client); // Handle each client in background
             }
         }
 
-        private async Task HandleTcpClientAsync(TcpClient client, CancellationToken cancellationToken)
+        private async Task HandleTcpClientAsync(TcpClient client)
         {
             using (client)
             using (var stream = client.GetStream())
             {
                 var buffer = new byte[1024];
-                while (!cancellationToken.IsCancellationRequested)
+                string picoId = null;
+                try
                 {
-                    int bytesRead = await stream.ReadAsync(buffer, cancellationToken);
-                    if (bytesRead == 0) break; // Client disconnected
+                    // Read initial config/status message to get Pico ID
+                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
+                    if (bytesRead > 0)
+                    {
+                        string received = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                        var doc = JsonDocument.Parse(received);
+                        if (doc.RootElement.TryGetProperty("id", out var idProp))
+                        {
+                            picoId = idProp.GetString();
+                            _connectedPicos[picoId] = client;
+                            Console.WriteLine($"[TCP] Registered Pico: {picoId}");
+                        }
+                    }
 
-                    string received = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Console.WriteLine($"[TCP] Received: {received}");
+                    // Main receive loop
+                    while (true)
+                    {
+                        int loopBytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
+                        if (loopBytesRead == 0) break; // Client disconnected
+
+                        string received = Encoding.UTF8.GetString(buffer, 0, loopBytesRead);
+                        Console.WriteLine($"[TCP] Received from {picoId}: {received}");
+
+                        // TODO: Parse message, update status, send commands, etc.
+                    }
                 }
-                Console.WriteLine("[TCP] Client disconnected");
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[TCP] Error with Pico {picoId}: {ex.Message}");
+                }
+                finally
+                {
+                    if (picoId != null)
+                    {
+                        _connectedPicos.TryRemove(picoId, out _);
+                        Console.WriteLine($"[TCP] Pico {picoId} disconnected");
+                    }
+                }
             }
         }
 
-        private string GetLocalIpAddress()
+        private string GetLocalIPAddress()
         {
-            foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+            var host = Dns.GetHostEntry(Dns.GetHostName());
+            foreach (var ip in host.AddressList)
             {
-                if (ni.OperationalStatus == OperationalStatus.Up &&
-                    ni.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
                 {
-                    foreach (UnicastIPAddressInformation ip in ni.GetIPProperties().UnicastAddresses)
-                    {
-                        if (ip.Address.AddressFamily == AddressFamily.InterNetwork)
-                        {
-                            return ip.Address.ToString();
-                        }
-                    }
+                    return ip.ToString();
                 }
             }
             return "127.0.0.1";
         }
+
+        public void Dispose()
+        {
+            _udpClient.Close();
+            Console.WriteLine($"{DateTime.UtcNow:o} [NetworkService] UDP server disposed");
+        }
+    }
+
+    internal class Announce
+    {
+        [JsonPropertyName("action")] public string Action { get; set; }
+        [JsonPropertyName("id")] public string Id { get; set; }
+        [JsonPropertyName("ip")] public string Ip { get; set; }
+        [JsonPropertyName("mac")] public string Mac { get; set; }
+        [JsonPropertyName("timestamp")] public string Timestamp { get; set; }
+    }
+
+    internal class Ack
+    {
+        [JsonPropertyName("action")] public string Action { get; set; }
+        [JsonPropertyName("id")] public string Id { get; set; }
+        [JsonPropertyName("Serverip")] public string ServerIp { get; set; }
+        [JsonPropertyName("Serverport")] public int ServerPort { get; set; }
+        [JsonPropertyName("timestamp")] public string Timestamp { get; set; }
     }
 }
