@@ -1,0 +1,19 @@
+{
+  "context": {
+    "project_description": "RV Electrical Automation system using Raspberry Pi Pico W devices running MicroPython and a .NET 9 Blazor Server Web App. Pico devices manage physical relay switching via button GPIOs and communicate with the Blazor server over UDP for discovery and TCP for state sync and control. Project consists of three parts: PicoAutomation (MicroPython), AutomationWeb (Blazor UI/server), and RVNetworkLibrary (network socket handling).",
+    "goals": [
+      "Maintain persistent TCP socket communication between Pico and server.",
+      "Add command queuing and ACK/Retry logic.",
+      "Synchronize relay state changes both directions.",
+      "Update UI in real-time from Pico events.",
+      "Improve MicroPython modularity and error handling."
+    ],
+    "preferred_languages": ["C#", "Python", "MicroPython"],
+    "style_guidelines": {
+      "MicroPython": "Use full-file rewrites instead of partial snippets to preserve indent structure.",
+      "C#": "Target .NET 9, use async patterns, minimize boilerplate.",
+      "General": "Avoid over-commenting, favor compact but readable code."
+    }
+  },
+  "model": "gpt-4o"
+}
