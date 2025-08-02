@@ -157,9 +157,25 @@ class NetworkManager:
                 if not line:
                     self.debug_print("TCP disconnected by server.")
                     break
+
+                # Parse the JSON message
                 msg = json.loads(line.decode())
-                self.debug_print("Received from server:", msg)
-                # Here you could call a handler method or put the message in a queue
+
+                # Validate required fields
+                if "type" not in msg or "data" not in msg:
+                    self.debug_print("Invalid message format:", msg)
+                    continue
+
+                # Handle message types
+                message_type = msg["type"]
+                if message_type == "status":
+                    self.handle_status_message(msg["data"])
+                elif message_type == "command":
+                    self.handle_command_message(msg["data"])
+                elif message_type == "heartbeat":
+                    self.handle_heartbeat_message(msg["data"])
+                else:
+                    self.debug_print(f"Unknown message type: {message_type}")
             except Exception as e:
                 self.debug_print("TCP receive error:", e)
                 break
@@ -216,4 +232,61 @@ class NetworkManager:
                 self.debug_print("TCP connection failed. Restarting network loop.")
                 await asyncio.sleep(2)
                 continue
+
+    def connect_wifi_with_backoff(self):
+        backoff = 1  # Start with 1 second
+        max_backoff = 30  # Cap at 30 seconds
+        while True:
+            if self.connect_wifi():
+                return True
+            self.debug_print(f"Wi-Fi connection failed. Retrying in {backoff} seconds...")
+            utime.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)  # Exponential backoff
+
+    def udp_announce_with_backoff(self):
+        backoff = 1  # Start with 1 second
+        max_backoff = 30  # Cap at 30 seconds
+        failed_attempts = 0
+        while True:
+            if self.udp_announce():
+                return True
+            failed_attempts += 1
+            if failed_attempts >= 10:
+                self.debug_print("Pausing UDP announcements for 1 minute...")
+                utime.sleep(60)  # Pause for 1 minute
+                failed_attempts = 0
+            else:
+                self.debug_print(f"UDP announcement failed. Retrying in {backoff} seconds...")
+                utime.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)  # Exponential backoff
+
+    def handle_status_message(self, data):
+        """Handle status messages from the server."""
+        self.debug_print("Status message received:", data)
+        # Process status updates here (e.g., log or update local state)
+
+    def handle_command_message(self, data):
+        """Handle command messages from the server."""
+        self.debug_print("Command message received:", data)
+        devices = data.get("devices", [])
+        for device in devices:
+            if device.get("device_type") == "relay":
+                label = device.get("label")
+                state = device.get("state")
+                if label and state:
+                    self.relay_toggle.toggle_relay(label, state)
+                else:
+                    self.debug_print("Invalid relay command:", device)
+
+    def handle_heartbeat_message(self, data):
+        """Handle heartbeat messages from the server."""
+        self.debug_print("Heartbeat message received:", data)
+        # Optionally, send a response or log the heartbeat
+
+    async def tcp_run_with_recovery(self):
+        while True:
+            if await self.tcp_run_async():
+                return True
+            self.debug_print("TCP connection failed. Retrying...")
+            await asyncio.sleep(5)  # Retry after 5 seconds
 

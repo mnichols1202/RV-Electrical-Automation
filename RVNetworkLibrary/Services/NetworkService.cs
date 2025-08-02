@@ -102,15 +102,33 @@ namespace RVNetworkLibrary.Services
 
         private async Task StartTcpServerAsync()
         {
-            _tcpListener = new TcpListener(IPAddress.Any, _tcpPort);
-            _tcpListener.Start();
-            Console.WriteLine($"[TCP] Server listening on port {_tcpPort}");
+            int retryCount = 0;
+            int backoff = 1000; // Start with 1 second
+            int maxBackoff = 30000; // Cap at 30 seconds
 
             while (true)
             {
-                TcpClient client = await _tcpListener.AcceptTcpClientAsync();
-                Console.WriteLine($"[TCP] Client connected: {client.Client.RemoteEndPoint}");
-                _ = HandleTcpClientAsync(client); // Handle each client in background
+                try
+                {
+                    _tcpListener = new TcpListener(IPAddress.Any, _tcpPort);
+                    _tcpListener.Start();
+                    Console.WriteLine($"[TCP] Server listening on port {_tcpPort}");
+
+                    while (true)
+                    {
+                        TcpClient client = await _tcpListener.AcceptTcpClientAsync();
+                        Console.WriteLine($"[TCP] Client connected: {client.Client.RemoteEndPoint}");
+                        _ = HandleTcpClientAsync(client); // Handle each client in background
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[{DateTime.UtcNow:o}] [TCP] Error: {ex.Message}. Restarting in {backoff}...");
+                    _tcpListener?.Stop();
+                    await Task.Delay(backoff);
+                    retryCount++;
+                    backoff = Math.Min(backoff * 2, maxBackoff); // Exponential backoff
+                }
             }
         }
 
