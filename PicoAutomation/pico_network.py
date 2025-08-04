@@ -1,4 +1,4 @@
-﻿import uasyncio as asyncio
+import uasyncio as asyncio
 import network
 import socket
 import json
